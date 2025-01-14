@@ -1,0 +1,15 @@
+[workspace]
+members = ["sqler"]
+resolver = "2"
+
+[workspace.dependencies]
+logos = "0.15.0"
+thiserror = "2.0.9"
+serde = { version = "1.0.217", features = ["derive"] }
+proptest = "1.6.0"
+pretty_assertions = "1.4.1"
+criterion = "0.5.1"
+
+[profile.release]
+opt-level = 3
+lto = true
