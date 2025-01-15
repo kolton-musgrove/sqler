@@ -19,8 +19,7 @@ An opinionated SQL formatter for consistent, read-at-a-glance SQL.
 Add sqler to your project's deps:
 
 ```toml
-// cargo.toml
-> sqler = "0.1.0"
+sqler = "0.1.0"
 ```
 
 ## Usage
