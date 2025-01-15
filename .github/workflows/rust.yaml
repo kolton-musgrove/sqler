@@ -1,4 +1,4 @@
-name: Rust
+name: Rust CI/CD
 
 on:
   push:
@@ -18,10 +18,60 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 1
+        fetch-depth: 0  # Needed to get all tags for versioning
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Build
       run: cargo build --verbose
 
     - name: Run tests
       run: cargo test --verbose
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get current version
+      id: current_version
+      run: |
+        VERSION=$(grep -m1 'version = "' Cargo.toml | cut -d '"' -f2)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Check if version tag exists
+      id: check_tag
+      run: |
+        if git rev-parse "v${{ steps.current_version.outputs.version }}" >/dev/null 2>&1; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create Release
+      if: steps.check_tag.outputs.exists == 'false'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION=${{ steps.current_version.outputs.version }}
+        # Create a new tag
+        git tag "v$VERSION"
+        
+        # Create GitHub release with changelog
+        gh release create "v$VERSION" \
+          --title "Release v$VERSION" \
+          --generate-notes
+
+    - name: Publish to crates.io
+      if: steps.check_tag.outputs.exists == 'false'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      run: cargo publish
