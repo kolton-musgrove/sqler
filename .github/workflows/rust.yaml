@@ -83,4 +83,21 @@ jobs:
       if: steps.check_tag.outputs.exists == 'false'
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      run: cargo publish
+      run: |
+        # Get the version
+        VERSION=${{ steps.current_version.outputs.version }}
+        
+        # Publish sqler library first
+        cargo publish -p sqler
+        
+        # Wait for crates.io to process the library
+        sleep 30
+        
+        # Update sqler-cli's dependency to use the published version
+        sed -i 's|sqler = { path = "../sqler" }|sqler = "'$VERSION'"|' sqler-cli/Cargo.toml
+        
+        # Then publish the CLI tool
+        cargo publish -p sqler-cli
+        
+        # Revert the change to Cargo.toml to keep the local development setup
+        git checkout sqler-cli/Cargo.toml
