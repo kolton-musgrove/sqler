@@ -2,6 +2,8 @@
 
 An opinionated SQL formatter for consistent, read-at-a-glance SQL.
 
+![sqler-sql-formatter-pig-nose](https://github.com/user-attachments/assets/db39fa47-fd4d-4e76-8008-ed1ee329a422)
+
 ## Features
 
 - Formats SQL queries with customizable indentation
