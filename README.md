@@ -62,3 +62,25 @@ let config = Config {
 ```bash
 cargo build --release
 ```
+
+## Running in a CLI
+
+1. Install rustup, cargo, and rust
+2. Clone the repo
+3. Build the project:
+
+```bash
+cargo build -p sqler-cli
+```
+
+4. Install the cli globally
+
+```bash
+cargo install --path sqler-cli
+```
+
+5. Echo in sql code to format:
+
+```bash
+echo "SELECT id AS user_id, name, * FROM users WHERE age > 25" | sqler
+```
