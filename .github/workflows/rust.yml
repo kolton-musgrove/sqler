@@ -16,6 +16,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+    
+    - name: List directory structure
+      run: ls -la
+
     - name: Build
       run: cargo build --verbose
     - name: Run tests
