@@ -2,14 +2,14 @@
 members = ["sqler", "sqler-cli"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
 [workspace.dependencies]
 logos = "0.15.0"
 thiserror = "2.0.9"
 clap = { version = "4.5.26", features = ["derive"] }
-
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
 
 [profile.release]
 opt-level = 3
