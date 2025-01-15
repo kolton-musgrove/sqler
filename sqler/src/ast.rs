@@ -64,7 +64,7 @@ pub enum Expression {
     Asterisk {
         span: Span,
     },
-    BinaryOp {
+    BinaryOperation {
         span: Span,
         left: Box<Expression>,
         op: Operator,
@@ -82,7 +82,7 @@ impl Expression {
         match self {
             Expression::Column { span, .. } => span.clone(),
             Expression::Literal { span, .. } => span.clone(),
-            Expression::BinaryOp { span, .. } => span.clone(),
+            Expression::BinaryOperation { span, .. } => span.clone(),
             Expression::Function { span, .. } => span.clone(),
             Expression::Asterisk { span } => span.clone(),
         }
@@ -125,4 +125,23 @@ pub enum Operator {
     Minus,
     Multiply,
     Divide,
+}
+
+impl std::fmt::Display for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Operator::Equals => write!(f, "="),
+            Operator::NotEquals => write!(f, "!="),
+            Operator::LessThan => write!(f, "<"),
+            Operator::GreaterThan => write!(f, ">"),
+            Operator::LessEquals => write!(f, "<="),
+            Operator::GreaterEquals => write!(f, ">="),
+            Operator::And => write!(f, "AND"),
+            Operator::Or => write!(f, "OR"),
+            Operator::Plus => write!(f, "+"),
+            Operator::Minus => write!(f, "-"),
+            Operator::Multiply => write!(f, "*"),
+            Operator::Divide => write!(f, "/"),
+        }
+    }
 }

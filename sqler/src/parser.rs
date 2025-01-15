@@ -185,8 +185,18 @@ impl<'a> Parser<'a> {
             self.parse_expression()?
         };
 
-        // handle optional alias
+        // handle optional AS keyword and alias
         let alias = if matches!(
+            self.current,
+            Some(Token {
+                kind: TokenKind::As,
+                ..
+            })
+        ) {
+            self.advance(); // consume AS
+            let token = self.expect(TokenKind::Identifier)?;
+            Some(self.get_identifier_text(&token))
+        } else if matches!(
             self.current,
             Some(Token {
                 kind: TokenKind::Identifier,
@@ -207,8 +217,40 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        // start with parsing the highest precedence expressions
-        self.parse_primary_expression()
+        // Parse the left side of any potential binary operation
+        let mut left = self.parse_primary_expression()?;
+
+        // Look for binary operators
+        while let Some(token) = &self.current {
+            let op = match token.kind {
+                TokenKind::Equals => Some(Operator::Equals),
+                TokenKind::NotEquals => Some(Operator::NotEquals),
+                TokenKind::LessThan => Some(Operator::LessThan),
+                TokenKind::GreaterThan => Some(Operator::GreaterThan),
+                TokenKind::LessEquals => Some(Operator::LessEquals),
+                TokenKind::GreaterEquals => Some(Operator::GreaterEquals),
+                _ => None,
+            };
+
+            if let Some(operator) = op {
+                let start_span = left.span();
+                self.advance(); // consume the operator
+
+                let right = self.parse_primary_expression()?;
+                let end_span = right.span();
+
+                left = Expression::BinaryOperation {
+                    span: Span::from(start_span.start..end_span.end),
+                    left: Box::new(left),
+                    op: operator,
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+
+        Ok(left)
     }
 
     fn parse_table_reference(&mut self) -> Result<TableReference, ParseError> {
