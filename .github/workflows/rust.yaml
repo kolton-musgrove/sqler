@@ -11,26 +11,17 @@ env:
 
 jobs:
   build:
+    name: Build and test
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Get all history for debugging
-    
-    - name: Debug git status
-      run: |
-        echo "Git status:"
-        git status
-        echo -e "\nTracked files:"
-        git ls-files
-        echo -e "\nVerify Cargo.toml files:"
-        git ls-files | grep Cargo.toml
-        echo -e "\nDirectory contents:"
-        ls -R
+        fetch-depth: 1
 
     - name: Build
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
