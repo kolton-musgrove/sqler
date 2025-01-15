@@ -1,7 +1,11 @@
 [package]
 name = "sqler"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "sqler"
+path = "src/lib.rs"
 
 [features]
 default = ["tsql"]
@@ -10,4 +14,3 @@ tsql = []
 [dependencies]
 logos = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }

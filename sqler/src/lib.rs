@@ -6,7 +6,6 @@ pub mod lexer;
 pub mod parser;
 
 pub use config::Config;
-// pub use error::Error;
 pub use formatter::format_sql;
 
 #[cfg(feature = "tsql")]

@@ -1,0 +1,12 @@
+[package]
+name = "sqler-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sqler"
+path = "src/main.rs"
+
+[dependencies]
+sqler = { path = "../sqler" }
+clap = { workspace = true }
