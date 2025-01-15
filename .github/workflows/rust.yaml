@@ -1,4 +1,4 @@
-name: Rust CI/CD
+name: Rust
 
 on:
   push:
@@ -18,7 +18,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Needed to get all tags for versioning
+        fetch-depth: 0
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -50,11 +50,24 @@ jobs:
     - name: Check if version tag exists
       id: check_tag
       run: |
-        if git rev-parse "v${{ steps.current_version.outputs.version }}" >/dev/null 2>&1; then
+        if git ls-remote --tags origin "refs/tags/v${{ steps.current_version.outputs.version }}" | grep -q .; then
           echo "exists=true" >> $GITHUB_OUTPUT
         else
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: Configure Git
+      if: steps.check_tag.outputs.exists == 'false'
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "github-actions@github.com"
+
+    - name: Create and Push Tag
+      if: steps.check_tag.outputs.exists == 'false'
+      run: |
+        VERSION=${{ steps.current_version.outputs.version }}
+        git tag "v$VERSION"
+        git push origin "v$VERSION"
 
     - name: Create Release
       if: steps.check_tag.outputs.exists == 'false'
@@ -62,10 +75,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         VERSION=${{ steps.current_version.outputs.version }}
-        # Create a new tag
-        git tag "v$VERSION"
-        
-        # Create GitHub release with changelog
         gh release create "v$VERSION" \
           --title "Release v$VERSION" \
           --generate-notes
