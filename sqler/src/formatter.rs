@@ -33,15 +33,34 @@ impl<'a> SqlFormatter<'a> {
     fn format_select(&mut self, stmt: &SelectStatement) -> String {
         let mut parts = Vec::new();
 
-        // SELECT clause
-        parts.push(format!("{}SELECT", self.indent()));
-
+        // SELECT clause with first item
         self.indent_level += 1;
-        // format columns
         let columns = self.format_select_items(&stmt.columns);
         self.indent_level -= 1;
 
-        parts.push(columns);
+        // if we don't have any columns, crash out.
+        if columns.is_empty() {
+            return String::new();
+        }
+
+        // split the columns into the first line and subsequent lines
+        let column_lines: Vec<&str> = columns.split('\n').collect();
+        let select_line = format!("{}SELECT {}", self.indent(), column_lines[0].trim_start());
+        parts.push(select_line);
+
+        // add the rest of the columns accounting for the indent level if
+        // left align select is enabled.
+
+        let base_indent = self.indent();
+        let column_padding = if self.config.align_columns {
+            ' '.to_string().repeat(3)
+        } else {
+            "".to_string()
+        };
+
+        for line in column_lines.iter().skip(1) {
+            parts.push(format!("{}{}{}", base_indent, column_padding, line));
+        }
 
         // FROM clause
         parts.push(format!(
@@ -76,26 +95,35 @@ impl<'a> SqlFormatter<'a> {
     }
 
     fn format_select_items(&mut self, items: &[SelectItem]) -> String {
+        if items.is_empty() {
+            return String::new();
+        }
+
         let formatted: Vec<String> = items
             .iter()
-            .map(|item| {
-                format!(
-                    "{}{}",
-                    self.indent(),
-                    match item {
-                        SelectItem::Wildcard { .. } => "*".to_string(),
-                        SelectItem::QualifiedWildcard { qualifier, .. } => {
-                            format!("{}.*", qualifier)
-                        }
-                        SelectItem::Expression { expr, alias, .. } => {
-                            if let Some(alias_name) = alias {
-                                format!("{} AS {}", self.format_expression(expr), alias_name)
-                            } else {
-                                self.format_expression(expr)
-                            }
+            .enumerate()
+            .map(|(index, item)| {
+                let item_str = match item {
+                    SelectItem::Wildcard { .. } => "*.".to_string(),
+                    SelectItem::QualifiedWildcard { qualifier, .. } => {
+                        format!("{}.*", qualifier)
+                    }
+                    SelectItem::Expression { expr, alias, .. } => {
+                        if let Some(alias_name) = alias {
+                            format!("{} AS {}", self.format_expression(expr), alias_name)
+                        } else {
+                            self.format_expression(expr)
                         }
                     }
-                )
+                };
+
+                // for the first item, don't add indent - it'll be handeld in format_select
+                // for subsequent items, add indent to align with first item's stgarting position
+                if index == 0 {
+                    item_str
+                } else {
+                    format!("{}{}", self.indent(), item_str)
+                }
             })
             .collect();
 

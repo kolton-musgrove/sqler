@@ -1,0 +1,2692 @@
+-- Simple SELECT
+SELECT id,
+       first_name,
+       last_name,
+FROM users
+WHERE age > 25;
+
+-- Complex JOIN with subquery
+SELECT o.order_id,
+       c.customer_name,
+       (
+         SELECT SUM(total)
+         FROM order_details
+         WHERE order_id = o.order_id
+       ) AS total_amount
+FROM orders AS o
+WHERE o.order_date >= '2024-01-01'
+  AND o.status = 'completed';
+
+-- Test Case 3: Multiple JOINs with GROUP BY and HAVING
+SELECT p.category_id,
+       c.category_name,
+       COUNT(o.order_id)         AS total_orders,
+       SUM(o.quantity * p.price) AS revenue
+FROM products AS p
+     LEFT JOIN categories AS c
+            ON p.category_id = c.id
+     LEFT JOIN order_items AS o
+            ON p.product_id = o.product_id
+GROUP BY p.category_id,
+         c.category_name
+HAVING COUNT(o.order_id) > 100
+ORDER BY revenue DESC
+LIMIT 10;
+
+-- Test Case 4: UNION and nested subqueries
+SELECT name,
+       'Customer' AS type
+FROM customers
+WHERE status = 'active'
+UNION
+SELECT name,
+       'Employee' AS type
+FROM employees
+WHERE (
+    department_id IN (
+      SELECT id
+      FROM departments
+      WHERE location = 'HQ'
+    )
+    AND hire_date >= '2023-01-01'
+  );
+
+-- Test Case 5: INSERT with SELECT
+INSERT INTO monthly_reports (
+    month,
+    total_sales,
+    avg_order_value,
+    customer_count
+  )
+SELECT DATE_TRUNC('month', order_date) AS month,
+       SUM(total_amount)               AS total_sales,
+       AVG(total_amount)               AS avg_order_value,
+       COUNT(DISTINCT customer_id)     AS customer_count
+FROM orders
+WHERE order_date >= '2024-01-01'
+  AND order_date < '2024-02-01'
+GROUP BY DATE_TRUNC('month', order_date);
+
+-- Test Case 6: UPDATE with JOIN and CASE
+UPDATE products AS p
+SET price = CASE
+    WHEN s.total_sold > 1000 THEN p.price * 1.1
+    WHEN s.total_sold < 100  THEN p.price * 0.9
+    ELSE p.price
+  END
+FROM (
+    SELECT product_id,
+           SUM(quantity) AS total_sold
+    FROM order_items
+    GROUP BY product_id
+  ) AS s
+WHERE p.product_id = s.product_id;
+
+-- Test Case 7: Complex WITH clause (CTE)
+WITH monthly_sales AS (
+  SELECT DATE_TRUNC('month', order_date) AS month,
+         SUM(total_amount)               AS revenue
+  FROM orders
+  GROUP BY DATE_TRUNC('month', order_date)
+),
+avg_sales AS (
+  SELECT AVG(revenue) AS avg_monthly_revenue
+  FROM monthly_sales
+)
+SELECT ms.month,
+       ms.revenue,
+       ROUND(
+         (ms.revenue - avg.avg_monthly_revenue) / avg.avg_monthly_revenue * 100,
+         2
+       ) AS revenue_variance_pct
+FROM monthly_sales AS ms
+  CROSS JOIN avg_sales avg
+WHERE ms.revenue > avg.avg_monthly_revenue
+ORDER BY revenue_variance_pct DESC;
+
+-- Test Case 8: CREATE TABLE with constraints
+CREATE TABLE employee_records (
+  id            SERIAL PRIMARY KEY,
+  employee_id   VARCHAR(10) NOT NULL UNIQUE,
+  first_name    VARCHAR(50) NOT NULL,
+  last_name     VARCHAR(50) NOT NULL,
+  email         VARCHAR(100) CHECK (email LIKE '%@%'),
+  salary        DECIMAL(10, 2) CHECK (salary > 0),
+  department_id INTEGER REFERENCES departments(id),
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT name_check CHECK (
+    first_name != ''
+    AND last_name != ''
+  )
+);
+
+-- Test Case 9: ALTER TABLE with multiple operations
+ALTER TABLE products
+  ADD COLUMN     description      TEXT,
+  ADD COLUMN     last_modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  ADD CONSTRAINT price_check      CHECK (price >= 0),
+  DROP COLUMN    outdated_field,
+  ALTER COLUMN   category_id      SET NOT NULL,
+  RENAME COLUMN  product_name     TO name;
+
+-- Test Case 10: DELETE with complex conditions
+DELETE FROM order_items
+WHERE order_id IN (
+    SELECT order_id
+    FROM orders
+    WHERE status = 'cancelled'
+      AND order_date < CURRENT_DATE - INTERVAL '90 days'
+  )
+  AND product_id IN (
+    SELECT id
+    FROM products
+    WHERE discontinued = true
+  );
+
+-- complex stored procedure
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE
+OR ALTER Procedure dbo.spAbsenceAndVacancyReport(
+  @pUserId                         int,
+  @pOrgId                          int,
+  @pFromDate                       datetime2,
+  @pToDate                         datetime2,
+  @pLocationIds                    varchar(max) = null,
+  @pPositionTypeIds                varchar(max) = null,
+  @pContractIds                    varchar(max) = null,
+  @pEmployeeIds                    varchar(max) = null,
+  @pSubIds                         varchar(max) = null,
+  @pNeedSub                        bit = null,
+  @psubstitutePolicyIds            varchar(max) = null,
+  @pIsVacancy                      bit = null,
+  @pIsAbsence                      bit = null,
+  @pIsExtracted                    bit = null,
+  @pExtractedForConnectionId       int = 0,
+  @pExtractId                      int = null,
+  @pAbsenceReasonIds               varchar(max) = null,
+  @pAbsenceReasonCategoryIds       varchar(max) = null,
+  @pExcludeLocations               bit = null,
+  @pExcludePositionTypes           bit = null,
+  @pExcludeContracts               bit = null,
+  @pExcludeEmployees               bit = null,
+  @pExcludeSubs                    bit = null,
+  @pExcludeAbsenceReasons          bit = null,
+  @pExcludeAbsenceReasonCategories bit = null,
+  @pExcludeSubstitutePolicyIds     bit = null,
+  @debug                           bit = 0
+)
+AS BEGIN
+    -- REMEMBER: Any changes here must be reflected in the AbsenceAndVacancySchema's
+    --           AbsenceAndVacancyTempTableDefinition const
+    
+    -- Uncomment this section and assign these variables when debugging
+    /*
+      DECLARE
+      @pUserId							           int,
+      @pOrgId								           int,
+      @pFromDate							         datetime2,
+      @pToDate 							           datetime2,
+      @pLocationIds						         varchar(max) = null,
+      @pPositionTypeIds 					     varchar(max) = null,
+      @pContractIds						         varchar(max) = null,
+      @pEmployeeIds						         varchar(max) = null,
+      @pSubIds							           varchar(max) = null,
+      @pNeedSub							           bit = null,
+      @psubstitutePolicyIds				     varchar(max) = null,
+      @pIsVacancy							         bit = null,
+      @pIsAbsence							         bit = null,
+      @pIsExtracted						         bit = null,
+      @pExtractedForConnectionId			 int = 0,
+      @pExtractId							         int = null,
+      @pAbsenceReasonIds					     varchar(max) = null,
+      @pAbsenceReasonCategoryIds			 varchar(max) = null,
+      @pExcludeLocations					     bit = null,
+      @pExcludePositionTypes				   bit = null,
+      @pExcludeContracts					     bit = null,
+      @pExcludeEmployees					     bit = null,
+      @pExcludeSubs						         bit = null,
+      @pExcludeAbsenceReasons				   bit = null,
+      @pExcludeAbsenceReasonCategories bit = null,
+      @pExcludeSubstitutePolicyIds		 bit = null,
+      @debug								           bit = 0;
+    */
+
+    CREATE TABLE #ReturnTable (
+                                  Query varchar(10),
+                                  OrgId int,
+                                  OrgIdentifier nvarchar(50),
+                                  ConfirmationNumber varchar(26),
+                                  CreateDateTime datetime2,
+                                  LeadTime decimal(24,6),
+                                  NumDays smallint,
+                                  TotalDayPortion decimal(9,4),
+                                  TotalDurationMinutes int,
+                                  IsApproved int,
+                                  Date date,
+                                  DayPart nvarchar(1000),
+                                  DayPortion decimal(5,4),
+                                  AbsStartTime smalldatetime,
+                                  AbsEndTime smalldatetime,
+                                  AbsDurationMinutes int,
+                                  AbsDurationHours decimal(6,4),
+                                  SubStartTime smalldatetime,
+                                  SubEndTime smalldatetime,
+                                  SubDurationMinutes int,
+                                  SubDurationHours decimal(8,6),
+                                  SubMinutesWorked smallint,
+                                  LocationId int,
+                                  LocationName nvarchar(120),
+                                  LocationIdentifier nvarchar(100),
+                                  LocationCode nvarchar(50),
+                                  LocationGroupId int,
+                                  LocationGroupName nvarchar(120),
+                                  LocationGroupIdentifier nvarchar(100),
+                                  AbsentEmployeeId int,
+                                  AbsentEmployeeLastName nvarchar(118),
+                                  AbsentEmployeeMiddleName nvarchar(80),
+                                  AbsentEmployeeFirstName nvarchar(80),
+                                  AbsentEmployeeExternalId nvarchar(100),
+                                  AbsentEmployeeSecondaryIdentifier nvarchar(100),
+                                  AbsentEmployeeBadgeNumber nvarchar(200),
+                                  AbsentEmployeeLoginEmail nvarchar(200),
+                                  AbsentEmployeeScheduleStartTime time(0),
+                                  AbsentEmployeeScheduleHalfDayMorningEnd time(0),
+                                  AbsentEmployeeScheduleHalfDayAfternoonStart time(0),
+                                  AbsentEmployeeScheduleEndTime time(0),
+                                  PositionId int,
+                                  Title nvarchar(100),
+                                  PositionNumber nvarchar(50),
+                                  PositionCode nvarchar(50),
+                                  PositionTypeId int,
+                                  PositionTypeName nvarchar(120),
+                                  PositionTypeExternalId nvarchar(100),
+                                  PositionTypeCode nvarchar(100),
+                                  PositionTypePrimaryStaffingCode nvarchar(50),
+                                  PositionTypeSecondaryStaffingCode nvarchar(50),
+                                  AbsenceReasonId int,
+                                  VacancyReasonId int,
+                                  ReasonName nvarchar(200),
+                                  ReasonIdentifier nvarchar(100),
+                                  ReasonCode nvarchar(100),
+                                  ReasonDescription nvarchar(1000),
+                                  ReasonCategoryIdentifier nvarchar(100),
+                                  ReasonCategoryName nvarchar(200),
+                                  ReasonCategoryCode nvarchar(100),
+                                  ReasonCategoryDescription nvarchar(1000),
+                                  SubEmployeeId int,
+                                  SubLastName nvarchar(80),
+                                  SubMiddleName nvarchar(80),
+                                  SubFirstName nvarchar(80),
+                                  SubExternalId nvarchar(100),
+                                  SubSecondaryIdentifier nvarchar(100),
+                                  SubPayCodeId int,
+                                  SubPayCodeName nvarchar(200),
+                                  SubPayCodeCode nvarchar(100),
+                                  SubPayCodeDescription nvarchar(1000),
+                                  SubPayCodeExternalId nvarchar(100),
+                                  SubPayCodeHourlyRate decimal(7,2),
+                                  SubPayCodeUnitRate decimal(7,2),
+                                  SubPayCodeHalfDayRate decimal(7,2),
+                                  SubPayCodeFullDayRate decimal(7,2),
+                                  SubLoginEmail nvarchar(200),
+                                  AccountingCodeId int,
+                                  AccountingCodeName nvarchar(200),
+                                  AccountingCodeDescription nvarchar(1000),
+                                  AccountingCodeExternalId nvarchar(100),
+                                  AccountingCodeAllocation decimal(5,4),
+                                  PayCodeId int,
+                                  PayCodeName nvarchar(200),
+                                  PayCodeDescription nvarchar(1000),
+                                  PayCodeExternalId nvarchar(100),
+                                  PayCodeCode nvarchar(100),
+                                  PayCodeHourlyRate decimal(7,2),
+                                  PayCodeUnitRate decimal(7,2),
+                                  PayCodeHalfDayRate decimal(7,2),
+                                  PayCodeFullDayRate decimal(7,2),
+                                  IsAbsence int,
+                                  IsVacancy int,
+                                  RequiresSub int,
+                                  IsFilled int,
+                                  FillStatus varchar(13),
+                                  AssignmentCreateDateTime datetime2,
+                                  AbsenceId bigint,
+                                  VacancyId bigint,
+                                  AssignmentId bigint,
+                                  AbsenceDetailId bigint,
+                                  VacancyDetailId bigint,
+                                  PayDays decimal(5,4),
+                                  PayHours decimal(10,6),
+                                  PayUnits decimal(7,2),
+                                  RawPayDays decimal(17,15),
+                                  RawPayHours decimal(10,6),
+                                  PayTypeId int,
+                                  PositionTypePayTypeId int,
+                                  TotalPayHoursForDay decimal(10,4),
+                                  TotalPayDayPortionsForDay decimal(38,4),
+                                  NotesToAdmin nvarchar(3000),
+                                  HasNotesToAdmin int,
+                                  AdminOnlyNotes nvarchar(3000),
+                                  HasAdminOnlyNotes int,
+                                  NotesToReplacement nvarchar(Max),
+                                  HasNotesToReplacement int,
+                                  SubIsShadowOrgUser bit,
+                                  SubSourceOrgId int,
+                                  SubShadowOrgName nvarchar(120),
+                                  IsVerified int,
+                                  VerifiedAtLocal datetime2,
+                                  VerifiedByOrgUserId int,
+                                  VerifiedByFirstName nvarchar(80),
+                                  VerifiedByLastName nvarchar(80),
+                                  VerifiedByMiddleName nvarchar(80),
+                                  VerifiedByExternalId nvarchar(100),
+                                  VerifyComments nvarchar(max),
+                                  BalanceTrackingTypeId int,
+                                  AbsenceReasonBalanceId int,
+                                  AbsenceReasonUsageHours decimal(6,4),
+                                  AbsenceReasonUsageDays decimal(6,4),
+                                  RawAbsenceReasonUsageHours decimal(6,4),
+                                  RawAbsenceReasonUsageDays decimal(6,4),
+                                  ConsecutiveHeaderId bigint,
+                                  ConsecutiveDetailId bigint,
+                                  ConsecutiveHeaderStartDate smalldatetime,
+                                  ConsecutiveHeaderEndDate smalldatetime,
+                                  ConsecutiveHeaderTotalDays smallint,
+                                  ConsecutiveDetailDayNumber smallint,
+                                  PositionTypeAccumulatedDays smallint,
+                                  TotalAccumulatedDays        smallint,
+                                  PositionTypeCategoryId smallint,
+                                  TotalAbsenceReasonUsageHoursForDay decimal(38,4),
+                                  TotalAbsenceReasonUsageDailyAmountForDay decimal(38,4),
+                                  DayOfWeekId int,
+                                  AbsenceQualifiesForFmla int,
+                                  ContractId int,
+                                  ContractExternalId nvarchar(100),
+                                  ContractName nvarchar(120),
+                                  SubPermissionSetName nvarchar(120),
+                                  SubPermissionSetIdentifier nvarchar(100),
+                                  SchoolYearStartDate date,
+                                  SchoolYearEndDate date,
+                                  SchoolYearName nvarchar(60),
+                                  IsExtracted bit,
+                                  ExtractedForConnectionId int,
+                                  ExtractId int,
+                                  WorkDayScheduleName nvarchar(60),
+                                  WorkDayScheduleId int,
+                                  WorkDayScheduleExternalId nvarchar(60),
+                                  WorkDaySchedulePeriodId int,
+                                  WorkDaySchedulePeriodName nvarchar(60),
+                                  FTE decimal(6,4),
+                                  HoursPerFullWorkDay decimal(6,4),
+                                  ReasonNames nvarchar(max),
+                                  FromDate date,
+                                  ToDate date,
+                                  ExtractedDate date,
+                                  WorkDayScheduleVariationName nvarchar(60),
+                                  AbsentEmployeeActive bit,
+                                  SubActive bit,
+                                  SubBadgeNumber nvarchar(200),
+                                  SubstitutePolicyName nvarchar(60),
+                                  SubstitutePolicyId int,
+                                  AssignmentExternalId nvarchar(100),
+                                  AssignmentIsLongTerm bit,
+                                  AssignmentNotes nvarchar(3000),
+                                  SubPhoneNumber nvarchar(20),
+                                  SubEmail nvarchar(100),
+                                  AbsenceReasonUsageExternalIds varchar(max),
+                                  StartedOutsideOfRange	bit,
+                                  EndedOutsideOfRange	bit,
+                                  AbsenceDetailStartTime smalldatetime,
+                                  AbsenceDetailEndTime smalldatetime,
+                                  VacancyDetailStartTime smalldatetime,
+                                  VacancyDetailEndTime smalldatetime,
+                                  ReasonNeedsApproval bit,
+                                  AbsentEmployeePermissionSetId int,
+                                  AbsentEmployeePermissionSetName nvarchar(60),
+                                  AbsentEmployeePermissionSetIdentifier nvarchar(50),
+                                  SubPositionCode nvarchar(60),
+                                  SubPositionNumber nvarchar(60),
+                                  SubPositionPayCodeId int,
+                                  SubPositionPayCodeName nvarchar(200),
+                                  SubPositionPayCodeCode nvarchar(100),
+                                  SubPositionPayCodeDescription nvarchar(1000),
+                                  SubPositionPayCodeExternalId nvarchar(100),
+                                  SubPositionPayCodeHourlyRate decimal(7,2),
+                                  SubPositionPayCodeUnitRate decimal(7,2),
+                                  SubPositionPayCodeHalfDayRate decimal(7,2),
+                                  SubPositionPayCodeFullDayRate decimal(7,2)
+    )
+
+    -- Eliminate Parameter Sniffing
+    Declare @UserId					int = @pUserId,
+            @OrgId					int = @pOrgId,
+            @FromDate				datetime2 = @pFromDate,
+            @ToDate 				datetime2 = @pToDate,
+            @LocationIds			varchar(max) = @pLocationIds,
+            @ExcludeLocations		bit = @pExcludeLocations,
+            @PositionTypeIds 		varchar(max) = @pPositionTypeIds,
+            @ExcludePositionTypes	bit = @pExcludePositionTypes,
+            @ContractIds			varchar(max) = @pContractIds,
+            @ExcludeContracts		bit = @pExcludeContracts,
+            @EmployeeIds			varchar(max) = @pEmployeeIds,
+            @ExcludeEmployees		bit = @pExcludeEmployees,
+            @SubIds					varchar(max) = @pSubIds,
+            @ExcludeSubs			bit = @pExcludeSubs,
+            @NeedSub				bit = @pNeedSub,
+            @IsVacancy				bit = @pIsVacancy,
+            @IsAbsence				bit = @pIsAbsence,
+            @IsExtracted			bit = @pIsExtracted,
+            @ExtractedForConnectionId int = @pExtractedForConnectionId,
+            @ExtractId				int = @pExtractId,
+            @SubstitutePolicyIds     varchar(max) = @psubstitutePolicyIds,
+            @ExcludeSubstitutePolicyIds bit = ISNULL(@pExcludeSubstitutePolicyIds, 0),
+            @AbsenceReasonIds		varchar(max) = @pAbsenceReasonIds,
+            @ExcludeAbsenceReasons	bit = @pExcludeAbsenceReasons,
+            @AbsenceReasonCategoryIds varchar(max) = @pAbsenceReasonCategoryIds,
+            @ExcludeAbsenceReasonCategories	bit = @pExcludeAbsenceReasonCategories
+
+    -- Constants
+    declare @UtcNow					datetime2 = GetUtcDate()
+    declare @MinSmallDateTime		smalldatetime = '1900/01/01'
+    declare @MaxSmallDateTime		smalldatetime = '2079/06/06 23:59:00'
+    declare @OrgUserRole_Admin		tinyint = 1
+    declare @OrgUserRole_Employee	tinyint = 2
+    declare @OrgUserRole_Sub		tinyint = 4
+    declare @AssignmentType_Contracted	smallint = 1
+    declare @AssignmentType_LongTerm	smallint = 2
+    declare @AssignmentType_Daily 		smallint = 4
+
+    declare @ApprovalStatus_NoApprovalRequired		smallint = 10
+    declare @ApprovalStatus_ApprovalRequired		smallint = 11
+    declare @ApprovalStatus_PartiallyApproved		smallint = 20
+    declare @ApprovalStatus_Approved				smallint = 30
+    declare @ApprovalStatus_Denied					smallint = 40
+    declare @ApprovalStatus_Cancelled				smallint = 50
+    declare @ApprovalStatus_CancelledAfterApproved	smallint = 51
+
+    declare @FillStatus_NoFillRequired		smallint = 4
+
+    declare @CallerProvided_Locations		bit
+    declare @CallerProvided_PositionTypes	bit
+    declare @CallerProvided_Contracts		bit
+    declare @CallerProvided_Employees		bit
+    declare @CallerProvided_Subs			bit
+    declare @CallerProvided_SubPolicies bit
+    declare @CallerProvided_AbsenceReasons  bit
+    declare @IncludeSubNeeeded				bit
+    declare @IncludeSubNotNeeded			bit
+    declare @IncludeAbsences				bit
+    declare @IncludeVacancies				bit
+    declare @OrgExternalId					varchar(50)
+    declare @ExtractedMin					int
+    declare @ExtractedMax					int
+    declare @IncludeUnfilled                int = 1
+
+    -- If @ExtractID is supplied then assume we're looking for extracted records
+    if(@ExtractId is not null) begin
+        select	@ExtractedForConnectionId = ApplicationConnectionId,
+                @IsExtracted = 1,
+                @FromDate = Extract.StartDate,
+                @ToDate = Extract.EndDate
+        from Extract where ExtractId = @ExtractId
+    end
+
+    select	@CallerProvided_Locations		= case when IsNull(Trim(@LocationIds), '') = '' then 0 else 1 end,
+            @CallerProvided_Contracts		= case when IsNull(Trim(@ContractIds), '') = '' then 0 else 1 end,
+            @CallerProvided_Employees		= case when IsNull(Trim(@EmployeeIds), '') = '' then 0 else 1 end,
+            @CallerProvided_Subs			= case when IsNull(Trim(@SubIds), '') = '' then 0 else 1 end,
+            @CallerProvided_SubPolicies		= case when IsNull(Trim(@SubstitutePolicyIds), '') = '' then 0 else 1 end,
+            @CallerProvided_PositionTypes	= case when IsNull(Trim(@PositionTypeIds), '') = '' then 0 else 1 end,
+            @CallerProvided_AbsenceReasons  = case when IsNull(Trim(@AbsenceReasonIds), '') = '' AND IsNull(Trim(@AbsenceReasonCategoryIds), '') = '' then 0 else 1 end,
+            @IncludeAbsences				= case when IsNull(@IsAbsence, 1) = 1 and IsNull(@IsVacancy, 0) = 0 then 1 else 0 end,
+            @IncludeVacancies				= case when IsNull(@IsVacancy, 1) = 1 and IsNull(@IsAbsence, 0) = 0 and @CallerProvided_Employees = 0 then 1 else 0 end,
+            @IncludeSubNeeeded				= case
+                                                    when @NeedSub is null then 1
+                                                    when @NeedSub = 1 then 1
+                                                    else 0
+                end,
+            @IncludeSubNotNeeded			= case
+                                                  when IsNull(@NeedSub, 0) = 0 and @CallerProvided_Subs = 0 then 1
+                                                  else 0
+                end,
+            @OrgExternalId 					= o.ExternalId,
+            @ExtractedMin 					= case when @IsExtracted is null or @IsExtracted = 0 or @ExtractedForConnectionId is not null then 0 else 1 end,
+            @ExtractedMax					= case when @IsExtracted is null or @IsExtracted = 1 or @ExtractedForConnectionId is not null then 9999 else 0 end,
+            @ExtractedForConnectionId		= IsNull(@ExtractedForConnectionId, 0)
+    from	Organization	o (nolock)
+    where	o.OrgId = @OrgId
+
+
+    -- If we are excluding no subs that is the same as saying SubId != Null
+    -- This would mean that we are trying to exclude unfilled (including no sub needed) records
+    -- Set these variables so that the rest of the logic works properly
+    -- Also, if Subs are provided then the ExcludeSubs should be false as well, therefore we need to exclusively filter by those Subs
+    if (
+        (@CallerProvided_Subs = 0 and @ExcludeSubs = 1) OR
+        (@CallerProvided_Subs = 1 AND @ExcludeSubs = 0) OR
+            -- Also, if we're filtering on sub policy id, then also exclude unfilled records
+        (@SubstitutePolicyIds is not null and @ExcludeSubstitutePolicyIds <> 1)
+        )
+        begin
+            Set @IncludeUnfilled = 0
+            Set @IncludeSubNotNeeded = 0
+        end
+
+    -- Vacancies are logically excluded if you're only looking for No Sub Required or specific ABSENCE reasons
+    set @IncludeVacancies =
+        case when @IncludeVacancies = 1
+              and @IncludeSubNeeeded = 1
+              and (@ExcludeAbsenceReasons = 1 or IsNull(Trim(@AbsenceReasonIds), '') = '')
+              and (@ExcludeAbsenceReasonCategories = 1 or IsNull(Trim(@AbsenceReasonCategoryIds), '') = '')
+            then 1
+            else 0
+        end
+
+
+    -- Make sure that @ToDate reflects the end of the day
+    set @ToDate = Convert(Char(10), @ToDate, 101)
+    set @ToDate = DATEADD(MINUTE, 1439, @ToDate)
+
+    -- Table Variables
+    BEGIN
+        Create Table #LocationTable (LocationId			int primary key,
+                                     LocationName		varchar(60),
+                                     ExternalId			varchar(50),
+                                     LocationCode		varchar(50),
+                                     LocationGroupId	int,
+                                     LocationGroupName	varchar(60),
+                                     LocationGroupXid	varchar(50))
+
+        Create Table #PositionTypeTable (PositionTypeId						int primary key,
+                                         PositionTypeName					varchar(60),
+                                         ExternalId							varchar(50),
+                                         Code								varchar(50),
+                                         PayTypeId							int,
+                                         CategoryId							smallint,
+                                         AbsenceReasonTrackingTypeId		int,
+                                         PositionTypePrimaryStaffingCode	varchar(50),
+                                         PositionTypeSecondaryStaffingCode	varchar(50))
+
+        CREATE TABLE  #ContractTable (ContractId		int primary key,
+                                      ContractName	varchar(60),
+                                      ExternalId		varchar(50))
+
+        CREATE TABLE #AbsenceReasonTable (AbsenceReasonId					int primary key,
+                                          AbsenceReasonName					varchar(100),
+                                          AbsenceReasonExternalId			varchar(50),
+                                          AbsenceReasonCode					varchar(50),
+                                          AbsenceReasonDescription			varchar(500),
+                                          AbsenceReasonCategoryId			int,
+                                          AbsenceReasonCategoryName			varchar(100),
+                                          AbsenceReasonCategoryExternalId	varchar(50),
+                                          AbsenceReasonCategoryCode			varchar(50),
+                                          AbsenceReasonCategoryDescription	varchar(500))
+
+        CREATE TABLE #EmployeeTable	(EmployeeId				int primary key,
+                                      FirstName				varchar(40),
+                                      MiddleName				varchar(40),
+                                      LastName				varchar(40),
+                                      UserId					int,
+                                      ExternalId				varchar(50),
+                                      SecondaryIdentifier	varchar(50),
+                                      BadgeNumber			varchar(100),
+                                      Active                 bit,
+                                      LoginEmail				varchar(100),
+                                      PermissionSetId		int,
+                                      PermissionSetName      varchar(60),
+                                      PermissionSetIdentifier varchar(50),
+                                      INDEX ByUserId NONCLUSTERED(UserId))
+
+        CREATE TABLE #SubTable (SubId				int primary key,
+                                FirstName			varchar(40),
+                                MiddleName			varchar(40),
+                                LastName			varchar(40),
+                                UserId				int,
+                                ExternalId			varchar(50),
+                                SecondaryIdentifier	varchar(50),
+                                BadgeNumber			varchar(100),
+                                PhoneNumber         varchar(20),
+                                Email               varchar(100),
+                                LoginEmail			varchar(100),
+                                PayCodeId			int,
+                                IsShadowOrgUser		bit,
+                                ShadowFromOrgId		int,
+                                Active              bit,
+                                PermissionSetName	varchar(60),
+                                PermissionSetXid	varchar(50),
+                                SubstitutePolicyName varchar(60),
+                                SubstitutePolicyId int,
+                                INDEX ByUserId NONCLUSTERED(UserId),
+                                INDEX ByPayCodeId NONCLUSTERED(PayCodeId),
+                                INDEX ByShadowOrgId NONCLUSTERED(ShadowFromOrgId),
+                                INDEX ByPolicyId NONCLUSTERED(SubstitutePolicyId))
+
+        CREATE TABLE #AbsenceTable	(AbsenceId			bigint primary key,
+                                     CreatedUtc			datetime2,
+                                     StartTimeUtc		smalldatetime,
+                                     StartTimeLocal		smalldatetime,
+                                     EndTimeLocal		smalldatetime,
+                                     NumDays			smallint,
+                                     EmployeeId			int,
+                                     TotalDayPortion	decimal(8,4),
+                                     TotalDuration		int,
+                                     ApprovalStatusId	smallint,
+                                     NotesToApprover	varchar(1500),
+                                     AdminOnlyNotes		varchar(1500),
+                                     QualifiesForFmlaId	tinyint,
+                                     INDEX ByTeacherId NONCLUSTERED(EmployeeId))
+
+        CREATE TABLE #AbsenceDetailTable ( AbsenceDetailId		bigint primary key,
+                                           AbsenceId			bigint,
+                                           StartDate			date,
+                                           EndDate				date,
+                                           StartTimeLocal		smalldatetime,
+                                           StartTimeUtc			smalldatetime,
+                                           EndTimeLocal			smalldatetime,
+                                           DayPartId			smallint,
+                                           DayPortion			decimal(5,4),
+                                           TotalHourlyAmount	decimal(6,4),
+                                           TotalDailyAmount		decimal(6,4),
+                                           Duration				smallint,
+                                           BreakDuration		smallint,
+                                           IsExtracted			bit,
+                                           ExtractedDate		date,
+                                           CalendarChangeId		int,
+                                           DayOfWeek			int,
+                                           EmployeeId			int,
+                                           StartedOutsideOfRange	bit,
+                                           EndedOutsideOfRange	bit,
+                                           INDEX ByAbsenceId NONCLUSTERED(AbsenceId, StartDate))
+
+        CREATE TABLE #VacancyTab	(VacancyId			bigint primary key,
+                                   CreatedUtc			datetime2,
+                                   StartTimeUtc			smalldatetime,
+                                   NumDays				smallint,
+                                   AbsenceId			bigint,
+                                   PositionId			int,
+                                   IsNormalVacancy		bit,
+                                   NotesToReplacement	varchar(Max),
+                                   AdminOnlyNotes		varchar(1500),
+                                   EffectiveDayPortion	decimal(7,4),
+                                   EffectiveDuration	int,
+                                   ApprovalStatusId		smallint,
+                                   ContractId			int,
+                                   FillStatusId			smallint,
+                                   ObjectScopeId        bigint,
+                                   ShouldBeReturned     bit,
+                                   INDEX ByAbsenceId NONCLUSTERED(AbsenceId),
+                                   INDEX ByPositionId NONCLUSTERED(PositionId))
+
+        CREATE TABLE #VacancyDetailTable 	(VacancyDetailId		bigint primary key,
+                                           VacancyId				bigint,
+                                           AbsenceId				bigint,
+                                           StartDate				date,
+                                           EndDate                date,
+                                           StartTimeLocal			smalldatetime,
+                                           StartTimeUtc			smalldatetime,
+                                           EndTimeLocal			smalldatetime,
+                                           NeedsReplacement		bit,
+                                           AssignmentId			bigint,
+                                           LocationId				int,
+                                           PayCodeId				int,
+                                           PayTypeId				int,
+                                           SubDurationHours		decimal(8,6),
+                                           SubMinutesWorked		int,
+                                           PayDayPortion			decimal(6,4),
+                                           PayHours				decimal(10,4), --Some of the PayDurationOverrides are coming in with user errors of unit * 60 * 60 - we need to account for that so the reports don't break
+                                           PayUnits               decimal(7,2),
+                                           VerifiedAtLocal		datetime2,
+                                           VerifiedByOrgUserId    int,
+                                           VerifiedByFirstName    nvarchar(80),
+                                           VerifiedByLastName     nvarchar(80),
+                                           VerifiedByMiddleName   nvarchar(80),
+                                           VerifiedByExternalId   nvarchar(100),
+                                           VerifyComments			nvarchar(max),
+                                           VacancyReasonId		int,
+                                           IsExtracted			bit,
+                                           WorkDayScheduleId		int,
+                                           PositionSchedulePeriodId    int,
+                                           WorkDaySchedulePeriodId     int,
+                                           ExtractedDate			date,
+                                           CalendarChangeId		int,
+                                           StartedOutsideOfRange	bit,
+                                           EndedOutsideOfRange	bit,
+                                           ShouldBeReturned     bit,
+                                           INDEX ByVacancyId NONCLUSTERED(VacancyId, StartDate),
+                                           INDEX ByAbsenceId NONCLUSTERED(AbsenceId, VacancyId, StartDate),
+                                           INDEX ByAssignmentId NONCLUSTERED(AssignmentId))
+
+        CREATE TABLE #AssignmentTable	(AssignmentId		bigint primary key,
+                                        CreatedUtc			datetime2,
+                                        StartTimeLocal		smalldatetime,
+                                        EndTimeLocal		smalldatetime,
+                                        SubId				int,
+                                        PositionId			int,
+                                        ExternalId			nvarchar(100),
+                                        IsLongTerm			bit,
+                                        Notes				nvarchar(3000),
+                                        INDEX BySubId NONCLUSTERED(SubId),
+                                        INDEX ByPositionId NONCLUSTERED(PositionId))
+
+        CREATE TABLE #AbsenceReasonUsage	(AbsenceReasonUsageId		bigint primary key,
+                                           AbsenceReasonId				bigint,
+                                           AbsenceDetailId				bigint,
+                                           ExternalId					varchar(50),
+                                           HourlyAmount				decimal(6,4),
+                                           DailyAmount					decimal(6,4),
+                                           INDEX ByAbsenceDetailId NONCLUSTERED(AbsenceDetailId))
+
+        --============================================================================================================
+        -- This memory table prevents many redundant reads of the employee schedule. Big time saver.
+        --============================================================================================================
+        CREATE TABLE #ScheduleTab	(	EmployeeId				int,
+                                      PositionId				int,
+                                      DayOfWeek				int,
+                                      LocationId				int,
+                                      StartTime				time(0),
+                                      HalfDayMorningEnd		time(0),
+                                      HalfDayAfternoonStart	time(0),
+                                      EndTime					time(0),
+                                      EffectiveFromDate       date,
+                                      EffectiveToDate         date,
+                                      Index ByPrimaryInfo CLUSTERED (EmployeeId, PositionId, DayOfWeek))
+    END
+
+    --============================================================================================================
+    -- Load Locations, PositionTypes, Conrtracts, and AbsenceReasons
+    --============================================================================================================
+    if @CallerProvided_Locations = 0
+        begin
+            insert	#LocationTable
+            select	l.LocationId,
+                    l.Name,
+                    l.ExternalId,
+                    l.Code,
+                    l.LocationGroupId,
+                    lg.Name,
+                    lg.ExternalId
+            from	Location		l	with (nolock)
+                        join	LocationGroup	lg	with (nolock)	on	lg.LocationGroupId = l.LocationGroupId
+                        JOIN	dbo.GetAdminLocationIds(@UserId, @OrgId) ual on ual.locationId = l.LocationId
+            where	l.OrgId = @OrgId
+        end
+    else if @ExcludeLocations = 1
+        begin
+            insert	#LocationTable
+            select	l.LocationId,
+                    l.Name,
+                    l.ExternalId,
+                    l.Code,
+                    l.LocationGroupId,
+                    lg.Name,
+                    lg.ExternalId
+            from	Location		l	with (nolock)
+                        join	LocationGroup	lg	with (nolock)	on	lg.LocationGroupId = l.LocationGroupId
+                        JOIN	dbo.GetAdminLocationIds(@UserId, @OrgId) ual on ual.locationId = l.LocationId
+            where	l.OrgId = @OrgId
+                and		l.LocationId not in (select * from string_split(@LocationIds, ','))
+        end
+    else begin
+        insert	#LocationTable
+        select	l.LocationId,
+                l.Name,
+                l.ExternalId,
+                l.Code,
+                l.LocationGroupId,
+                lg.Name,
+                lg.ExternalId
+        from	string_split(@LocationIds, ',')		ss
+                    join	Location		l	with (nolock)	on	l.LocationId = ss.value
+                    join	LocationGroup	lg	with (nolock)	on	lg.LocationGroupId = l.LocationGroupId
+                    JOIN	dbo.GetAdminLocationIds(@UserId, @OrgId) ual on ual.locationId = l.LocationId
+        where	l.OrgId = @OrgId
+    end
+
+    if @CallerProvided_PositionTypes = 0
+        begin
+            insert	#PositionTypeTable
+            select	pt.PositionTypeId,
+                    pt.Name,
+                    pt.ExternalId,
+                    pt.Code,
+                    pt.PayTypeId,
+                    pt.CategoryId,
+                    pt.AbsenceReasonTrackingTypeId,
+                    pt.PrimaryStaffingProviderCode,
+                    pt.SecondaryStaffingProviderCode
+            from	PositionType	pt	with (nolock)
+                        JOIN	dbo.GetAdminPositionTypeIds(@UserId, @OrgId) uapt on uapt.PositionTypeId = pt.PositionTypeId
+            where	pt.OrgId = @OrgId
+        end
+    else if @ExcludePositionTypes = 1
+        begin
+            insert	#PositionTypeTable
+            select	pt.PositionTypeId,
+                    pt.Name,
+                    pt.ExternalId,
+                    pt.Code,
+                    pt.PayTypeId,
+                    pt.CategoryId,
+                    pt.AbsenceReasonTrackingTypeId,
+                    pt.PrimaryStaffingProviderCode,
+                    pt.SecondaryStaffingProviderCode
+            from	PositionType	pt	with (nolock)
+                        JOIN	dbo.GetAdminPositionTypeIds(@UserId, @OrgId) uapt on uapt.PositionTypeId = pt.PositionTypeId
+            where	pt.OrgId = @OrgId
+                and		pt.PositionTypeId not in (select * from string_split(@PositionTypeIds, ','))
+        end
+    else begin
+        insert	#PositionTypeTable
+        select	pt.PositionTypeId,
+                pt.Name,
+                pt.ExternalId,
+                pt.Code,
+                pt.PayTypeId,
+                pt.CategoryId,
+                pt.AbsenceReasonTrackingTypeId,
+                pt.PrimaryStaffingProviderCode,
+                pt.SecondaryStaffingProviderCode
+        from	string_split(@PositionTypeIds, ',')		ss
+                    join	PositionType	pt	with (nolock)	on pt.PositionTypeId = ss.value
+                    JOIN	dbo.GetAdminPositionTypeIds(@UserId, @OrgId) uapt on uapt.PositionTypeId = pt.PositionTypeId
+        where	pt.OrgId = @OrgId
+    end
+
+    if @CallerProvided_Contracts = 0
+        begin
+            insert	#ContractTable
+            select	c.ContractId,
+                    c.Name,
+                    c.ExternalId
+            from	Contract		c	with (nolock)
+            where	c.OrgId = @OrgId
+        end
+    else if @ExcludeContracts = 1
+        begin
+            insert	#ContractTable
+            select	c.ContractId,
+                    c.Name,
+                    c.ExternalId
+            from	Contract		c	with (nolock)
+            where	c.OrgId = @OrgId
+                and     c.ContractId not in (select * from string_split(@ContractIds, ','))
+        end
+    else begin
+        insert	#ContractTable
+        select	distinct
+            c.ContractId,
+            c.Name,
+            c.ExternalId
+        from	string_split(@ContractIds, ',')		ss
+                    join	Contract		c	with (nolock) 	on	c.ContractId = ss.value
+        where	c.OrgId = @OrgId
+    end
+
+    if @CallerProvided_AbsenceReasons = 0
+        begin
+            insert	#AbsenceReasonTable
+            select	distinct
+                ar.AbsenceReasonId,
+                ar.Name,
+                ar.ExternalId,
+                ar.Code,
+                ar.Description,
+                arc.AbsenceReasonCategoryId,
+                arc.Name,
+                arc.ExternalId,
+                arc.Code,
+                arc.Description
+            from		AbsenceReason		  ar	with (nolock)
+                            left join	AbsenceReasonCategory arc	with (nolock) ON ar.absenceReasonCategoryId = arc.AbsenceReasonCategoryId and ar.OrgId = arc.OrgId
+            where	ar.OrgId = @OrgId
+        end
+    else if @ExcludeAbsenceReasons = 1 begin
+        insert	#AbsenceReasonTable
+        select	distinct
+            ar.AbsenceReasonId,
+            ar.Name,
+            ar.ExternalId,
+            ar.Code,
+            ar.Description,
+            arc.AbsenceReasonCategoryId,
+            arc.Name,
+            arc.ExternalId,
+            arc.Code,
+            arc.Description
+        from		AbsenceReason		  ar	with (nolock)
+                        left join   AbsenceReasonCategory arc	with (nolock) ON ar.absenceReasonCategoryId = arc.AbsenceReasonCategoryId and ar.OrgId = arc.OrgId
+        where	ar.OrgId = @OrgId
+            and     (
+            @AbsenceReasonIds is null
+                OR (@ExcludeAbsenceReasons = 1 and ar.AbsenceReasonId not in (select  value from string_split(@AbsenceReasonIds, ',')))
+                OR (@ExcludeAbsenceReasons = 0 and ar.AbsenceReasonId in (select  value from string_split(@AbsenceReasonIds, ',')))
+            )
+            and     (
+            @AbsenceReasonCategoryIds is null
+                OR (@ExcludeAbsenceReasonCategories = 1 and arc.AbsenceReasonCategoryId not in (select  value from string_split(@AbsenceReasonCategoryIds, ',')))
+                OR (@ExcludeAbsenceReasonCategories = 0 and arc.AbsenceReasonCategoryId in (select  value from string_split(@AbsenceReasonCategoryIds, ',')))
+            )
+    end
+    else begin
+        insert	#AbsenceReasonTable
+        select	distinct
+            ar.AbsenceReasonId,
+            ar.Name,
+            ar.ExternalId,
+            ar.Code,
+            ar.Description,
+            arc.AbsenceReasonCategoryId,
+            arc.Name,
+            arc.ExternalId,
+            arc.Code,
+            arc.Description
+        from		AbsenceReason		  ar	with (nolock)
+                        left join   AbsenceReasonCategory arc	with (nolock) ON ar.absenceReasonCategoryId = arc.AbsenceReasonCategoryId and ar.OrgId = arc.OrgId
+        where	ar.OrgId = @OrgId
+            and     (
+            @AbsenceReasonIds is null
+                OR (@ExcludeAbsenceReasons = 1 and ar.AbsenceReasonId not in (select  value from string_split(@AbsenceReasonIds, ',')))
+                OR (@ExcludeAbsenceReasons = 0 and ar.AbsenceReasonId in (select  value from string_split(@AbsenceReasonIds, ',')))
+            )
+            and     (
+            @AbsenceReasonCategoryIds is null
+                OR (@ExcludeAbsenceReasonCategories = 1 and arc.AbsenceReasonCategoryId not in (select  value from string_split(@AbsenceReasonCategoryIds, ',')))
+                OR (@ExcludeAbsenceReasonCategories = 0 and arc.AbsenceReasonCategoryId in (select  value from string_split(@AbsenceReasonCategoryIds, ',')))
+            )
+    end
+
+    --============================================================================================================
+    -- Load Absences and Employees
+    --============================================================================================================
+    if @IncludeAbsences = 1 AND @CallerProvided_Employees = 0
+        begin
+            -- Loading the absences should reduce the number of employees we need to load
+            ;WITH CTE_OSL AS (Select ObjectScopeId, LocationId from ObjectScopeLocation with (nolock) where OrgId = @OrgId)
+             insert	#AbsenceTable
+             select	distinct
+                 a.AbsenceId,
+                 a.CreatedUtc,
+                 a.StartTimeUtc,
+                 a.StartTimeLocal,
+                 a.EndTimeLocal,
+                 a.NumDays,
+                 a.EmployeeId,
+                 a.TotalEffectiveDayPortion,
+                 a.TotalEffectiveDuration,
+                 a.ApprovalStatusId,
+                 a.NotesToApprover,
+                 a.AdminOnlyNotes,
+                 a.QualifiesForFmlaId
+             from	Absence			a	with (nolock)
+                         join	CTE_OSL		osl	with (nolock)	on	osl.ObjectScopeId = a.ObjectScopeId
+                         join	ObjectScopePositionType	osp	with (nolock)	on	osp.ObjectScopeId = a.ObjectScopeId
+                         join	#LocationTable			lt					on	lt.LocationId = osl.LocationId
+                         join	#PositionTypeTable		pt					on	pt.PositionTypeId = osp.PositionTypeId
+             where	a.OrgId = @OrgId
+                 and		a.StartTimeLocal <= @ToDate
+                 and		a.EndTimeLocal >= @FromDate
+                 and		a.DeletedUtc > @UtcNow
+                 and		a.ClosedByCalendarChange = 0
+                 and		IsNull(a.ApprovalStatusId, 0) <> @ApprovalStatus_Denied		-- As a general rule, we just completely exclude Denied Absences from this View
+
+            -- Now load just the employees referenced on those absences
+            -- Notice that this code loads the referenced employees - even if those employees have already been soft-deleted.
+            ;WITH Permission_CTE AS (
+                SELECT OrgUserId = ops.OrgUserId,
+                       PermissionSetId = ps.PermissionSetId,
+                       PermissionSetName = ps.Name,
+                       PermissionSetIdentifier = ps.ExternalId
+                FROM OrgUSerPermissionSet ops with (nolock)
+                         INNER JOIN PermissionSet ps with (nolock) ON ps.PermissionSetId = ops.PermissionSetId
+                WHERE ps.OrgUserRole = @OrgUserRole_Employee
+                    AND ops.OrgId = @OrgId
+                    AND ps.OrgId = @OrgId
+            )
+             insert #EmployeeTable
+             select	ou.OrgUserId,
+                     ou.FirstName,
+                     ou.MiddleName,
+                     ou.LastName,
+                     ou.UserId,
+                     ou.ExternalId,
+                     ou.SecondaryIdentifier,
+                     ou.BadgeNumber,
+                     ou.Active,
+                     u.LoginEmail,
+                     ps.PermissionSetId,
+                     ps.PermissionSetName,
+                     ps.PermissionSetIdentifier
+             from	(
+                         select	distinct EmployeeId from #AbsenceTable
+                     )			at
+                         join	OrgUser		ou	with (nolock)	on	ou.OrgUserId = at.EmployeeId
+                         join	[User]		u	with (nolock)	on	u.UserId = ou.UserId
+                         join	Employee	e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                         left join 	Permission_CTE	ps	with (nolock) on ou.OrgUserId = ps.OrgUserId
+        end
+    else if @IncludeAbsences = 1 AND @ExcludeEmployees = 1
+        begin
+            -- Loading the absences should reduce the number of employees we need to load
+            insert	#AbsenceTable
+            select	distinct
+                a.AbsenceId,
+                a.CreatedUtc,
+                a.StartTimeUtc,
+                a.StartTimeLocal,
+                a.EndTimeLocal,
+                a.NumDays,
+                a.EmployeeId,
+                a.TotalEffectiveDayPortion,
+                a.TotalEffectiveDuration,
+                a.ApprovalStatusId,
+                a.NotesToApprover,
+                a.AdminOnlyNotes,
+                a.QualifiesForFmlaId
+            from	Absence					a	with (nolock)
+                        join	ObjectScopeLocation		osl	with (nolock)	on	osl.ObjectScopeId = a.ObjectScopeId
+                        join	ObjectScopePositionType	osp	with (nolock)	on	osp.ObjectScopeId = a.ObjectScopeId
+                        join	#LocationTable			lt					on	lt.LocationId = osl.LocationId
+                        join	#PositionTypeTable		pt					on	pt.PositionTypeId = osp.PositionTypeId
+            where	a.OrgId = @OrgId
+                and		a.StartTimeLocal <= @ToDate
+                and		a.EndTimeLocal >= @FromDate
+                and		a.DeletedUtc > @UtcNow
+                and		a.ClosedByCalendarChange = 0
+                and		IsNull(a.ApprovalStatusId, 0) <> @ApprovalStatus_Denied		-- As a general rule, we just completely exclude Denied Absences from this View
+                and		a.EmployeeId not in (select * from string_split(@EmployeeIds, ','))
+
+            -- Now load just the employees referenced on those absences
+            -- Notice that this code loads the referenced employees - even if those employees have already been soft-deleted.
+            ;WITH Permission_CTE AS (
+                SELECT OrgUserId = ops.OrgUserId,
+                       PermissionSetId = ps.PermissionSetId,
+                       PermissionSetName = ps.Name,
+                       PermissionSetIdentifier = ps.ExternalId
+                FROM OrgUSerPermissionSet ops with (nolock)
+                         INNER JOIN PermissionSet ps with (nolock) ON ps.PermissionSetId = ops.PermissionSetId
+                WHERE ps.OrgUserRole = @OrgUserRole_Employee
+                    AND ops.OrgId = @OrgId
+                    AND ps.OrgId = @OrgId
+            )
+             insert #EmployeeTable
+             select	ou.OrgUserId,
+                     ou.FirstName,
+                     ou.MiddleName,
+                     ou.LastName,
+                     ou.UserId,
+                     ou.ExternalId,
+                     ou.SecondaryIdentifier,
+                     ou.BadgeNumber,
+                     ou.Active,
+                     u.LoginEmail,
+                     ps.PermissionSetId,
+                     ps.PermissionSetName,
+                     ps.PermissionSetIdentifier
+             from	(
+                         select	distinct EmployeeId from #AbsenceTable
+                     )			at
+                         join	OrgUser		ou	with (nolock)	on	ou.OrgUserId = at.EmployeeId
+                         join	[User]		u	with (nolock)	on	u.UserId = ou.UserId
+                         join	Employee	e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                         left join 	Permission_CTE	ps	with (nolock) on ou.OrgUserId = ps.OrgUserId
+             where	ou.OrgId = @OrgId
+        end
+    else if(@IncludeAbsences = 1) begin
+        -- First load in the employees specified by the caller - even the deleted ones.
+        ;WITH Permission_CTE AS (
+            SELECT OrgUserId = ops.OrgUserId,
+                   PermissionSetId = ps.PermissionSetId,
+                   PermissionSetName = ps.Name,
+                   PermissionSetIdentifier = ps.ExternalId
+            FROM OrgUSerPermissionSet ops with (nolock)
+                     INNER JOIN PermissionSet ps with (nolock) ON ps.PermissionSetId = ops.PermissionSetId
+            WHERE ps.OrgUserRole = @OrgUserRole_Employee
+                AND ops.OrgId = @OrgId
+                AND ps.OrgId = @OrgId
+        )
+         insert	#EmployeeTable
+         select	ou.OrgUserId,
+                 ou.FirstName,
+                 ou.MiddleName,
+                 ou.LastName,
+                 ou.UserId,
+                 ou.ExternalId,
+                 ou.SecondaryIdentifier,
+                 ou.BadgeNumber,
+                 ou.Active,
+                 u.LoginEmail,
+                 ps.PermissionSetId,
+                 ps.PermissionSetName,
+                 ps.PermissionSetIdentifier
+         from	string_split(@EmployeeIds, ',')		ss
+                     join	OrgUser		ou	with (nolock)	on	ou.OrgUserId = ss.value
+                     join	[User]		u	with (nolock)	on	u.UserId = ou.UserId
+                     join	Employee	e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                     left join 	Permission_CTE	ps	with (nolock) on ou.OrgUserId = ps.OrgUserId
+         where	ou.OrgId = @OrgId
+
+        -- Now, load the absences for just those employees
+        insert	#AbsenceTable
+        select	distinct
+            a.AbsenceId,
+            a.CreatedUtc,
+            a.StartTimeUtc,
+            a.StartTimeLocal,
+            a.EndTimeLocal,
+            a.NumDays,
+            a.EmployeeId,
+            a.TotalEffectiveDayPortion,
+            a.TotalEffectiveDuration,
+            a.ApprovalStatusId,
+            a.NotesToApprover,
+            a.AdminOnlyNotes,
+            a.QualifiesForFmlaId
+        from	Absence					a	with (nolock)
+                    join	#EmployeeTable			e					on	e.EmployeeId = a.EmployeeId
+                    join	ObjectScopeLocation		osl	with (nolock)	on	osl.ObjectScopeId = a.ObjectScopeId
+                    join	ObjectScopePositionType	osp	with (nolock)	on	osp.ObjectScopeId = a.ObjectScopeId
+                    join	#LocationTable			lt					on	lt.LocationId = osl.LocationId
+                    join	#PositionTypeTable		pt					on	pt.PositionTypeId = osp.PositionTypeId
+        where	a.OrgId = @OrgId
+            and		a.StartTimeLocal <= @ToDate
+            and		a.EndTimeLocal >= @FromDate
+            and		a.DeletedUtc > @UtcNow
+            and		a.ClosedByCalendarChange = 0
+            and		IsNull(a.ApprovalStatusId, 0) <> @ApprovalStatus_Denied		-- As a general rule, we just completely exclude Denied Absences from this View
+    end
+
+    --============================================================================================================
+    -- Load Subs
+    --============================================================================================================
+    if @CallerProvided_Subs = 0
+        begin
+            -- Load all Subs, even the deleted ones.  Those who no longer have the Sub Role are handled below.
+            ;WITH Permission_CTE AS (
+                SELECT OrgUserId = ops.OrgUserId,
+                       PermissionSetName = ps.Name,
+                       PermissionSetIdentifier = ps.ExternalId
+                FROM OrgUSerPermissionSet ops with (nolock)
+                         INNER JOIN PermissionSet ps with (nolock) ON ps.PermissionSetId = ops.PermissionSetId
+                WHERE ps.OrgUserRole = @OrgUserRole_Sub
+                    AND ops.OrgId = @OrgId
+                    AND ps.OrgId = @OrgId
+            )
+             insert	#SubTable
+             select	ou.OrgUserId,
+                     ou.FirstName,
+                     ou.MiddleName,
+                     ou.LastName,
+                     ou.UserId,
+                     ou.ExternalId,
+                     ou.SecondaryIdentifier,
+                     ou.BadgeNumber,
+                     ou.PhoneNumber,
+                     ou.Email,
+                     u.LoginEmail,
+                     e.PayCodeId,
+                     ou.IsShadowOrgUser,
+                     ou.ShadowFromOrgId,
+                     ou.Active,
+                     ps.PermissionSetName,
+                     ps.PermissionSetIdentifier,
+                     ss.Name,
+                     ss.SubstituteSettingId
+             from	OrgUser					ou
+                         join	[User]					u	with (nolock)	on	u.UserId = ou.UserId
+                         join	Employee				e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                         join	SubstituteSetting		ss	with (nolock)	on	ss.SubstituteSettingId = e.SubstituteSettingId
+                         left join 	Permission_CTE		ps	with (nolock)	on	ou.OrgUserId = ps.OrgUserId
+             where	ou.OrgId = @OrgId
+        end
+    else if @ExcludeSubs = 1
+        begin
+            -- Load all Subs not specified by the caller, even the deleted ones.  Those who no longer have the Sub Role are handled below.
+            ;WITH Permission_CTE AS (
+                SELECT OrgUserId = ops.OrgUserId,
+                       PermissionSetName = ps.Name,
+                       PermissionSetIdentifier = ps.ExternalId
+                FROM OrgUSerPermissionSet ops with (nolock)
+                         INNER JOIN PermissionSet ps with (nolock) ON ps.PermissionSetId = ops.PermissionSetId
+                WHERE ps.OrgUserRole = @OrgUserRole_Sub
+                    AND ops.OrgId = @OrgId
+                    AND ps.OrgId = @OrgId
+            )
+             insert	#SubTable
+             select	ou.OrgUserId,
+                     ou.FirstName,
+                     ou.MiddleName,
+                     ou.LastName,
+                     ou.UserId,
+                     ou.ExternalId,
+                     ou.SecondaryIdentifier,
+                     ou.BadgeNumber,
+                     ou.PhoneNumber,
+                     ou.Email,
+                     u.LoginEmail,
+                     e.PayCodeId,
+                     ou.IsShadowOrgUser,
+                     ou.ShadowFromOrgId,
+                     ou.Active,
+                     PermissionSetName,
+                     PermissionSetIdentifier,
+                     ss.Name,
+                     ss.SubstituteSettingId
+             from	OrgUser					ou
+                         join	[User]					u	with (nolock)	on	u.UserId = ou.UserId
+                         join	Employee				e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                         join	SubstituteSetting		ss	with (nolock)	on	ss.SubstituteSettingId = e.SubstituteSettingId
+                         left join 	Permission_CTE		ps	with (nolock)	on	ou.OrgUserId = ps.OrgUserId
+             where	ou.OrgId = @OrgId
+                 and     ou.OrgUserId not in (select * from string_split(@SubIds, ','))
+        end
+    else begin
+        -- Load the subs specified by the caller, even the deleted ones - whether they are subs or not.
+        -- First, Insert a row for every EmployeeId provided by the caller
+        insert	#SubTable
+        select	ou.OrgUserId,
+                ou.FirstName,
+                ou.MiddleName,
+                ou.LastName,
+                ou.UserId,
+                ou.ExternalId,
+                ou.SecondaryIdentifier,
+                ou.BadgeNumber,
+                ou.PhoneNumber,
+                ou.Email,
+                u.LoginEmail,
+                e.PayCodeId,
+                ou.IsShadowOrgUser,
+                ou.ShadowFromOrgId,
+                ou.Active,
+                PermissionSetName = null,
+                PermissionSetXid = null,
+                SubstitutePolicyName = sub.Name,
+                SubstitutePolicyId = sub.SubstituteSettingId
+        from	string_split(@SubIds, ',')	ss
+                    join	OrgUser					ou	with (nolock)	on	ou.OrgUserId = ss.value
+                    join	[User]					u	with (nolock)	on	u.UserId = ou.UserId
+                    join	Employee				e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                    join	SubstituteSetting		sub	with (nolock)	on	sub.SubstituteSettingId = e.SubstituteSettingId
+        where	ou.OrgId = @OrgId
+
+        -- Now, find the permission profile for those who are currently substitutes.
+        update	#SubTable
+        set		PermissionSetName = ps.Name,
+               PermissionSetXid = ps.ExternalId
+        from	#SubTable	st
+                    join	OrgUserPermissionSet	ops	with (nolock)	on	ops.OrgUserId = st.SubId
+                    join	PermissionSet			ps	with (nolock)	on	ps.PermissionSetId = ops.PermissionSetId
+        where	ps.OrgUserRole = @OrgUserRole_Sub
+    end
+
+    -- Find any employees who used to be a sub, but are not anymore.
+    -- These are the ones who no longer have the Sub Role in their PermissionSet
+    -- This can be skipped if the caller provided a specific list of SubIds.
+    if @CallerProvided_Subs = 0 or @ExcludeSubs = 1
+        begin
+            if @SubIds is null
+                set @SubIds = ''
+
+            insert	#SubTable
+            select	ou.OrgUserId,
+                    ou.FirstName,
+                    ou.MiddleName,
+                    ou.LastName,
+                    ou.UserId,
+                    ou.ExternalId,
+                    ou.SecondaryIdentifier,
+                    ou.BadgeNumber,
+                    ou.PhoneNumber,
+                    ou.Email,
+                    u.LoginEmail,
+                    e.PayCodeId,
+                    ou.IsShadowOrgUser,
+                    ou.ShadowFromOrgId,
+                    ou.Active,
+                    PermissionSetName = '',
+                    PermissionSetXid = '',
+                    ss.Name,
+                    ss.SubstituteSettingId
+            from	(
+                        select	distinct a.EmployeeId
+                        from		Assignment	a
+                                        left join	#SubTable	st	on	st.SubId = a.EmployeeId
+                        where	st.SubId is null
+                              and     a.OrgId = @OrgId
+                              and		a.AssignmentTypeId <> @AssignmentType_Contracted
+                              and		a.EmployeeId not in (select * from string_split(@SubIds, ','))
+                    ) x
+                        join	OrgUser		ou	with (nolock)	on  ou.OrgUserId = x.EmployeeId
+                        join	[User]		u	with (nolock)	on	u.UserId = ou.UserId
+                        join	Employee	e	with (nolock)	on	e.EmployeeId = ou.OrgUserId
+                        join	SubstituteSetting	ss	with (nolock)	on	ss.SubstituteSettingId = e.SubstituteSettingId
+
+            where	ou.OrgId = @OrgId
+        end
+
+    --============================================================================================================
+    -- delete from #SubTable based on SubPolicy
+    --============================================================================================================
+
+    IF @CallerProvided_SubPolicies = 1
+    BEGIN
+        Create Table #SubPolicyIds (SubPolicyId int primary key) 
+        insert	#SubPolicyIds 
+            SELECT Distinct CAST(value AS INT) AS SubPolicy
+                        FROM	STRING_SPLIT(@SubstitutePolicyIds, ',')
+                        WHERE	ISNUMERIC(value) = 1
+
+        if @ExcludeSubstitutePolicyIds = 0
+        begin
+            -- The caller wants only those substitutes who make use of the specified Policy IDs. 
+            -- So, we need to delete the substitutes who DO NOT have the specified policy IDs.
+            -- This also includes any sub without a policy.
+            DELETE FROM #SubTable
+            from		#SubTable		st
+            left join	#SubPolicyIds	tab	on	tab.SubPolicyId = st.SubstitutePolicyId
+            where	st.SubstitutePolicyId is null	-- <== This sub does not have a Substitute Policy
+            or		tab.SubPolicyId is null			-- <== This sub has one of the specified policies
+        end
+        else begin
+            -- The caller wants those substitutes who DO NOT make use of the specified Policy IDs. 
+            -- So, we need to delete the substitutes who DO have the specified policy IDs.
+            -- This inner join finds the matching rows. 
+            DELETE FROM #SubTable
+            from		#SubTable	st
+            inner join	#SubPolicyIds	tab	on	tab.SubPolicyId = st.SubstitutePolicyId
+        end
+    END
+
+    --============================================================================================================
+    -- Load AbsenceDetails
+    --============================================================================================================
+    insert	#AbsenceDetailTable
+    select	ad.AbsenceDetailId,
+            ad.absenceId,
+            CONVERT(date, ad.StartTimeLocal),
+            CONVERT(date, ad.EndTimeLocal),
+            ad.StartTimeLocal,
+            ad.StartTimeUtc,
+            ad.EndTimeLocal,
+            ad.DayPartId,
+            COALESCE(ad.UserOverrideDayPortion, ad.AdjustedDayPortion, ad.DayPortion),
+            Sum(aru.HourlyAmount),
+            Sum(aru.DailyAmount),
+            IsNull(ad.AdjustedDuration, ad.ActualDuration),
+            IsNull(ad.AdjustedBreakDuration, 0),
+            IsExtracted = case  when @ExtractedForConnectionId = 0 and ad.LockedForExtracts > 0 then 1
+                                when @ExtractedForConnectionId > 0 and ade.AbsenceDetailExtractId is not null then 1
+                                else 0
+                      end,
+            ExtractedDate = CASE WHEN ad.LockedForExtracts = 0 THEN null
+                                 WHEN @ExtractedForConnectionId = 0 THEN (Select Max(ade1.CreatedUtc) from AbsenceDetailExtract ade1 where ade1.AbsenceDetailId = ad.AbsenceDetailId)
+                                 ELSE ade.CreatedUtc
+                      END,
+            ad.CalendarChangeId,
+            (DATEPART(dw, ad.StartTimeLocal) - 1) AS DayOfWeek,
+            at.EmployeeId,
+            StartedOutsideOfRange = case when ad.StartTimeLocal < @FromDate then 1 else 0 end,
+            EndedOutsideOfRange = case when ad.EndTimeLocal > @ToDate then 1 else 0 end
+    from		#AbsenceTable			at
+    join		AbsenceDetail			ad	with (nolock)	on	ad.AbsenceId = at.AbsenceId
+    join		AbsenceReasonUsage		aru	with (nolock)	on	aru.AbsenceDetailId = ad.AbsenceDetailId
+    join		#AbsenceReasonTable		ar                  on  aru.AbsenceReasonId = ar.AbsenceReasonId
+    left join	AbsenceDetailExtract	ade with (nolock)	on	ade.AbsenceDetailId = ad.AbsenceDetailId
+                                                            and ade.ApplicationConnectionId = @ExtractedForConnectionId
+    where	ad.OrgId = @OrgId
+        and		ad.StartTimeLocal <= @ToDate
+        and		ad.EndTimeLocal >= @FromDate
+        and		ad.DeletedUtc > @UtcNow
+        and		ad.ClosedByCalendarChange = 0
+        and		aru.OrgId = @OrgId
+        and		aru.DeletedUtc > @UtcNow
+        -- Filter by whether the row was extracted regardless of connection
+        and		ad.LockedForExtracts between @ExtractedMin and @ExtractedMax
+        -- Filter by whether the row was extracted for a particular connection
+        and		(	@IsExtracted is null 								-- Getting both extracted and not extracted; don't exclude any rows
+        or 	@ExtractedForConnectionId = 0						-- No connection specified; don't exclude any rows
+        or 	(@IsExtracted = 0 and ade.ExtractId is null)		-- not extracted; Include only rows that do not have a match on the left join
+        or 	(@IsExtracted = 1 and ade.ExtractId is not null and ade.ExtractId = isnull(@ExtractId, ade.ExtractId)) 	-- extracted; Include only rows that have a match on the left join;
+        -- optionally filter by supplied ExtractId
+        )
+    group by ad.AbsenceDetailId,
+             ad.absenceId,
+             CONVERT(date, ad.StartTimeLocal),
+             ad.StartTimeLocal,
+             ad.StartTimeUtc,
+             ad.EndTimeLocal,
+             ad.DayPartId,
+             COALESCE(ad.UserOverrideDayPortion, ad.AdjustedDayPortion, ad.DayPortion),
+             IsNull(ad.AdjustedDuration, ad.ActualDuration),
+             IsNull(ad.AdjustedBreakDuration, 0),
+             case  when @ExtractedForConnectionId = 0 and ad.LockedForExtracts > 0 then 1
+                   when @ExtractedForConnectionId > 0 and ade.AbsenceDetailExtractId is not null then 1
+                   else 0 end,
+             ad.LockedForExtracts,
+             ade.CreatedUtc,
+             ad.CalendarChangeId,
+             at.EmployeeId
+
+
+    --============================================================================================================
+    -- Load Absence Reason Usages
+    --============================================================================================================
+    insert #AbsenceReasonUsage
+    select
+        aru.AbsenceReasonUsageId,
+        aru.AbsenceReasonId,
+        aru.AbsenceDetailId,
+        aru.ExternalId,
+        aru.HourlyAmount,
+        aru.DailyAmount
+    from AbsenceReasonUsage aru
+             join #AbsenceDetailTable ad on ad.AbsenceDetailId = aru.AbsenceDetailId
+    where aru.OrgId = @OrgId
+        and aru.DeletedUtc > @UtcNow
+
+    --============================================================================================================
+    -- Load Vacancies and VacancyDetails
+    --============================================================================================================
+    insert	#VacancyTab
+    select	distinct
+        v.VacancyId,
+        v.CreatedUtc,
+        v.StartTimeUtc,
+        v.NumDays,
+        v.AbsenceId,
+        v.PositionId,
+        v.IsNormalVacancy,
+        v.NotesToReplacement,
+        v.AdminOnlyNotes,
+        v.TotalEffectiveDayPortion,
+        v.TotalEffectiveDuration,
+        v.ApprovalStatusId,
+        v.ContractId,
+        v.FillStatusId,
+        v.ObjectScopeId,
+        ShouldBeReturned = 0
+    from	Vacancy					v	with (nolock)
+    where	v.OrgId = @OrgId
+      and		v.StartTimeLocal <= @ToDate
+      and		v.EndTimeLocal >= @FromDate
+      and		v.DeletedUtc > @UtcNow
+      and		v.ClosedByCalendarChange = 0
+      and		IsNull(v.ApprovalStatusId, 0) <> @ApprovalStatus_Denied		-- As a general rule, we just completely exclude Denied Vacancies from this View
+      and		((@IncludeAbsences = 1 and v.AbsenceId is not null)  or (@IncludeVacancies = 1 and v.AbsenceId is null))
+
+    update vtab
+    set ShouldBeReturned = 1
+    from #VacancyTab vtab
+    join ObjectScopeLocation osl with (nolock) on osl.ObjectScopeId = vtab.ObjectScopeId
+    join ObjectScopePositionType osp with (nolock) on osp.ObjectScopeId = vtab.ObjectScopeId
+    join #LocationTable lt on lt.LocationId = osl.LocationId
+    join #PositionTypeTable pt on pt.PositionTypeId = osp.PositionTypeId
+    join #ContractTable ct on ct.ContractId = vtab.ContractId
+
+    insert	#VacancyDetailTable
+    select	vd.VacancyDetailId,
+            vd.VacancyId,
+            vt.AbsenceId,
+            CONVERT(date, vd.StartTimeLocal),
+            CONVERT(date, vd.EndTimeLocal),
+            vd.StartTimeLocal,
+            vd.StartTimeUtc,
+            vd.EndTimeLocal,
+            vd.NeedsReplacement,
+            vd.AssignmentId,
+            vd.LocationId,
+            vd.PayCodeId,
+            vd.PayTypeId,
+            SubDurationHours = CASE WHEN vd.StartTimeLocal is not null THEN ROUND(DATEDIFF(minute, vd.StartTimeLocal,  vd.EndTimeLocal)/60.0, 2) ELSE null END,
+            SubMinutesWorked = COALESCE(vd.PayDurationOverride, vd.AdjustedDuration -  ISNULL(vd.AdjustedBreakDuration, 0), vd.ActualDuration - ISNULL(vd.AdjustedBreakDuration, 0)),
+            PayDayPortion = COALESCE(vd.UserOverrideDayPortion, vd.AdjustedDayPortion, vd.DayPortion),
+            PayHours = COALESCE(vd.PayDurationOverride, vd.AdjustedDuration - ISNULL(vd.AdjustedBreakDuration,0), vd.ActualDuration - ISNULL(vd.AdjustedBreakDuration,0))/60.0,
+            PayUnits = COALESCE(vd.UserOverridePayUnits, vd.ActualPayUnits),
+            vd.VerifiedAtLocal,
+            vd.VerifiedByOrgUserId,
+            vou.FirstName,
+            vou.LastName,
+            vou.MiddleName,
+            vou.ExternalId,
+            vd.VerifyComments,
+            vd.VacancyReasonId,
+            IsExtracted = case  when @ExtractedForConnectionId = 0 and vd.LockedForExtracts > 0 then 1
+                                when @ExtractedForConnectionId > 0 and vde.VacancyDetailExtractId is not null then 1
+                                else 0
+                end,
+            WorkDayScheduleId = vd.WorkDayScheduleId,
+            PositionSchedulePeriodId = vd.PositionSchedulePeriodId,
+            WorkDaySchedulePeriodId = vd.WorkDaySchedulePeriodId,
+            ExtractedDate = CASE WHEN vd.LockedForExtracts = 0 THEN NULL
+                                 WHEN @ExtractedForConnectionId = 0 THEN (Select Max(vde1.CreatedUtc) from VacancyDetailExtract vde1 where vde1.VacancyDetailId = vd.VacancyDetailId)
+                                 ELSE vde.CreatedUtc
+                END,
+            vd.CalendarChangeId,
+            StartedOutsideOfRange = IIF(vd.StartTimeLocal < @FromDate, 1, 0),
+            EndedOutsideOfRange = IIF(vd.EndTimeLocal > @ToDate, 1, 0),
+            ShouldBeReturned =
+                  IIF(vt.ShouldBeReturned = 1 and
+                      exists (select * from #LocationTable lt where lt.LocationId = vd.LocationId), 1, 0)
+    from		#VacancyTab			 vt
+    join		VacancyDetail		 vd	 with (nolock)	on vd.VacancyId        = vt.VacancyId
+    left join	VacancyDetailExtract vde with (nolock)	on vde.VacancyDetailId = vd.VacancyDetailId and vde.ApplicationConnectionId = @ExtractedForConnectionId
+    left join   OrgUser              vou with (nolock)  on vou.OrgUserId       = vd.VerifiedByOrgUserId
+    where	vd.OrgId = @OrgId
+        and		vd.StartTimeLocal <= @ToDate
+        and		vd.EndTimeLocal >= @FromDate
+        and		vd.DeletedUtc > @UtcNow
+        and		vd.ClosedByCalendarChange = 0
+        -- Filter by whether the row was extracted regardless of connection
+        and		vd.LockedForExtracts between @ExtractedMin and @ExtractedMax
+        -- Filter by whether the row was extracted for a particular connection
+        and		(	@IsExtracted is null 								-- Getting both extracted and not extracted; don't exclude any rows
+        or 	@ExtractedForConnectionId = 0						-- No connection specified; don't exclude any rows
+        or 	(@IsExtracted = 0 and vde.ExtractId is null)		-- not extracted; Include only rows that do not have a match on the left join
+        or 	(@IsExtracted = 1 and vde.ExtractId is not null and vde.ExtractId = isnull(@ExtractId, vde.ExtractId)) 	-- extracted; Include only rows that have a match on the left join;
+        -- optionally filter by supplied ExtractId
+        )
+
+    -- DEBUG
+    IF @debug = 1
+        BEGIN
+            SELECT * FROM #LocationTable
+            SELECT * FROM #PositionTypeTable
+            SELECT * FROM #ContractTable
+            SELECT * FROM #AbsenceReasonTable
+            SELECT * FROM #EmployeeTable
+            SELECT * FROM #SubTable
+
+            SELECT 'AbsenceDetails'
+            SELECT * FROM #AbsenceDetailTable
+
+            SELECT 'AbsenceReasonUsage'
+            SELECT * FROM #AbsenceReasonUsage
+
+            SELECT 'VacancyTab'
+            SELECT * FROM #VacancyTab
+
+            SELECT 'VacancyDetailTable'
+            SELECT * FROM #VacancyDetailTable
+        END
+
+
+    --============================================================================================================
+    -- Pre-stage some filtered data based on the #AbsenceDetailTable and #VacancyDetailTable temp tables ahead of the inserts to the #VacancyDetailTable and the #AssignmentTable
+    --============================================================================================================
+    create table #StageAbsenceDetailTable ( AbsenceId	bigint,
+                                            StartDate	date,
+                                            EndDate		date,
+                                            VacancyId	bigint,
+                                            Index	ByAbsVacyStart (AbsenceId, VacancyId, StartDate))
+    insert #StageAbsenceDetailTable
+        select  distinct
+                ad.AbsenceId,
+                ad.StartDate,
+                ad.EndDate,
+                v.VacancyId
+        from	#AbsenceDetailTable ad
+        join	Vacancy				v	on v.AbsenceId = ad.AbsenceId
+        where	v.orgid = @OrgId
+        and		v.DeletedUtc > @UtcNow
+
+    create table #StageVacancyDetailTable (	AbsenceId	bigint,
+                                            StartDate	date,
+                                            VacancyId	bigint,
+                                            Index	ByAbsVacyStart (AbsenceId, VacancyId, StartDate))
+    insert #StageVacancyDetailTable
+        select	distinct
+                v.AbsenceId,
+                vd.StartDate,
+                v.VacancyId
+        from	#VacancyDetailTable vd
+        join	Vacancy				v	on v.VacancyId = vd.VacancyId
+        where	v.orgid = @OrgId
+        and		v.AbsenceId is not null
+
+    --============================================================================================================
+    -- Add vacancy detail rows for absence details, for which there is no matching detail on the date of the absence detail.
+    -- The ROW_NUMBER function serves as a primary key for the VacancyDetailTab, and will be converted to NULL on final Insert later
+    --============================================================================================================
+    insert #VacancyDetailTable
+    select VacancyDetailId = -1 * (ROW_NUMBER() over(order by abs.AbsenceId, abs.StartDate)),
+           abs.VacancyId,
+           abs.AbsenceId,
+           StartDate = abs.StartDate,
+           EndDate = abs.EndDate,
+           StartTimeLocal = null,
+           StartTimeUtc = null,
+           EndTimeLocal = null,
+           NeedsReplacement = 0,
+           AssignmentId = null,
+           LocationId = null,
+           PayCodeId = null,
+           PayTypeId = null,
+           SubDurationHours = 0.0,		-- No time worked for the sub
+           SubMinutesWorked = 0,
+           PayDayPortion = 0.0,		-- No pay for the sub
+           PayHours = 0.0,
+           PayUnits = 0.0,
+           VerifiedAtLocal = null,
+           VerifiedByOrgUserId = null,
+           VerifiedByFirstName = null,
+           VerifiedByLastName = null,
+           VerifiedByMiddleName = null,
+           VerifiedByExternalId = null,
+           VerifyComments = null,
+           VacancyReasonId = null,
+           IsExtracted = null,
+           WorkDayScheduleId = null,
+           PositionSchedulePeriodId = null,
+           WorkDaySchedulePeriodId = null,
+           ExtractedDate = null,
+           CalendarChangeId = null,
+           StartedOutsideOfRange = null,
+           EndedOutsideOfRange = null,
+           ShouldBeReturned = 1
+    from		#StageAbsenceDetailTable	abs
+    left join	#StageVacancyDetailTable	vac on	vac.AbsenceId = abs.AbsenceId
+                                                and vac.VacancyId = abs.VacancyId
+                                                and vac.StartDate = abs.StartDate
+    where vac.VacancyId is null
+
+    insert #AssignmentTable
+    select distinct
+        vtab.AssignmentId,
+        a.CreatedUtc,
+        a.StartTimeLocal,
+        a.EndTimeLocal,
+        a.EmployeeId,
+        a.PositionId,
+        a.ExternalId,
+        a.IsLongTerm,
+        a.Notes
+    from #VacancyDetailTable vtab
+             join Assignment   a on a.AssignmentId = vtab.AssignmentId
+             join #SubTable    s on s.SubId = a.EmployeeId
+    where	a.DeletedUtc > @UtcNow
+        and vtab.ShouldBeReturned = 1
+        and		ISNULL(a.CancelledAtUtc, @MaxSmallDateTime) > @UtcNow
+
+    insert	#ScheduleTab
+    select	distinct
+        atab.EmployeeId,
+        asn.PositionId,
+        wd.DayOfWeek,
+        psp.LocationId,
+        StartTime = MIN(case when psvp.PositionScheduleVariantId is not null then psvp.StartTime else wsvp.StartTime end) over (partition by atab.EmployeeId, asn.PositionId, wd.DayOfWeek),
+        HalfDayMorningEnd = MAX(case when psvp.PositionScheduleVariantId is not null then null else (case when wsvp.IsHalfDayMorningEnd = 1 then wsvp.NextStartTime else '00:00' end) end)  over (partition by atab.EmployeeId, asn.PositionId, wd.DayOfWeek),
+        HalfDayAfternoonStart = MAX(case when psvp.PositionScheduleVariantId is not null then null else (case when wsvp.IsHalfDayAfternoonStart = 1 then wsvp.StartTime else '00:00' end) end) over (partition by atab.EmployeeId, asn.PositionId, wd.DayOfWeek),
+        EndTime = MAX(case when psvp.PositionScheduleVariantId is not null then psvp.EndTime else wsvp.EndTime end) over (partition by atab.EmployeeId, asn.PositionId, wd.DayOfWeek),
+        EffectiveFromDate = p.StartDate,
+        EffectiveToDate = p.EndDate
+    from		#AbsenceTable					atab
+    join		Assignment						asn	  (nolock)	on	asn.EmployeeId = atab.EmployeeId
+    join		Position						p	  (nolock)	on	p.PositionId = asn.PositionId
+    join		PositionSchedule				ps	  (nolock)	on	ps.PositionId = p.PositionId
+    join		PositionSchedulePeriod			psp   (nolock)	on	psp.PositionScheduleId = ps.PositionScheduleId
+                                                                and psp.OrgId = ps.OrgId
+    join		PositionScheduleUsage			psu   (nolock)	on	psu.PositionScheduleId = ps.PositionScheduleId
+                                                                and psu.OrgId = ps.OrgId
+    join		WorkDay							wd	  (nolock)	on	psu.WorkDayId = wd.WorkDayId
+                                                                and psu.OrgId = wd.OrgId
+    left join	WorkDaySchedulePeriod			wsp	  (nolock)	on	wsp.WorkDaySchedulePeriodId = psp.WorkDaySchedulePeriodId
+                                                                and wsp.OrgId = @OrgId
+                                                                and wsp.DeletedUtc > @UtcNow
+    left join	WorkDayScheduleVariant			wsv   (nolock)	on	wsv.WorkDayScheduleId = wsp.WorkDayScheduleId
+                                                                and wsv.IsStandard = 1
+                                                                and wsv.DeletedUtc > @UtcNow
+    left join	WorkDayScheduleVariantPeriod	wsvp  (nolock)	on	wsvp.WorkDayScheduleVariantId = wsv.WorkDayScheduleVariantId
+                                                                and wsvp.WorkDaySchedulePeriodId = wsp.WorkDaySchedulePeriodId
+                                                                and wsvp.DeletedUtc > @UtcNow
+    left join	PositionScheduleVariant			psv	  (nolock)	on	psv.PositionScheduleId = psp.PositionScheduleId
+                                                                and psv.OrgId = @OrgId
+                                                                and	psv.DeletedUtc > @UtcNow
+    left join	PositionScheduleVariantPeriod	psvp  (nolock)	on	psvp.PositionScheduleVariantId = psv.PositionScheduleVariantId
+                                                                and psvp.OrgId = @OrgId
+                                                                and psvp.DeletedUtc > @UtcNow
+    where	asn.DeletedUtc > @UtcNow
+        and	p.DeletedUtc > @UtcNow
+        and	ps.DeletedUtc > @UtcNow
+        and	psp.DeletedUtc > @UtcNow
+        and	wd.DeletedUtc > @UtcNow
+        and	asn.StartTimeLocal <= @ToDate
+        and	asn.EndTimeLocal >= @FromDate
+        and	asn.AssignmentTypeId = 1
+
+
+    -- DEBUG
+    IF @debug = 1
+        BEGIN
+            SELECT 'After Pre-stage filtering'
+
+            SELECT 'StageAbsenceDetails'
+            SELECT * FROM #StageAbsenceDetailTable
+
+            SELECT 'StageVacancyDetails'
+            SELECT * FROM #StageVacancyDetailTable
+
+            SELECT 'VacancyDetails'
+            SELECT * FROM #VacancyDetailTable
+
+            SELECT 'Assignments'
+            SELECT * FROM #AssignmentTable
+
+            SELECT 'ScheduleTab'
+            SELECT * FROM #ScheduleTab
+        END
+
+    -- =========================================================================================================================
+    -- Query 1: Absences which Require a Sub
+    -- =========================================================================================================================
+    Insert #ReturnTable
+    select  Query = 'Q1',
+            OrgId = @OrgId,
+            OrgIdentifier = @OrgExternalId,
+            ConfirmationNumber = CONCAT('#',atab.AbsenceId),
+            CreateDateTime = atab.CreatedUtc,
+            LeadTime = CAST(DATEDIFF(minute, atab.CreatedUtc, ad.StartTimeUtc) AS DECIMAL) / 60,
+            NumDays = atab.NumDays,
+            TotalDayPortion = atab.TotalDayPortion,
+            TotalDurationMinutes = atab.TotalDuration,
+            IsApproved = case when atab.ApprovalStatusId = @ApprovalStatus_Approved then 1 else 0 end,
+            Date = ad.StartDate,
+            DayPart = IsNull(dp.Description, 'Custom'),
+            DayPortion = ad.DayPortion,
+            AbsStartTime = ad.StartTimeLocal,
+            AbsEndTime = ad.EndTimeLocal,
+            AbsDurationMinutes = DATEDIFF(minute, ad.StartTimeLocal,  ad.EndTimeLocal),
+            AbsDurationHours = ROUND(DATEDIFF(minute, ad.StartTimeLocal, ad.EndTimeLocal)/60.0, 2),
+            SubStartTime = vd.StartTimeLocal,
+            SubEndTime = vd.EndTimeLocal,
+            SubDurationMinutes = DATEDIFF(minute, vd.StartTimeLocal,  vd.EndTimeLocal),
+            vd.SubDurationHours,
+            vd.SubMinutesWorked,
+            LocationId = IsNull(l.LocationId, lt.LocationId),
+            LocationName = IsNull(l.LocationName, lt.LocationName),
+            LocationIdentifier = IsNull(l.ExternalId, lt.ExternalId),
+            LocationCode = IsNull(l.LocationCode, lt.LocationCode),
+            LocationGroupId = IsNull(l.LocationGroupId, lt.LocationGroupId),
+            LocationGroupName = IsNull(l.LocationGroupName, lt.LocationGroupName),
+            LocationGroupIdentifier = IsNull(l.LocationGroupXid, lt.LocationGroupXid),
+            AbsentEmployeeId = et.EmployeeId,
+            AbsentEmployeeLastName = et.LastName,
+            AbsentEmployeeMiddleName = et.MiddleName,
+            AbsentEmployeeFirstName = et.FirstName,
+            AbsentEmployeeExternalId = et.ExternalId,
+            AbsentEmployeeSecondaryIdentifier = et.SecondaryIdentifier,
+            AbsentEmployeeBadgeNumber = et.BadgeNumber,
+            AbsentEmployeeLoginEmail = et.LoginEmail,
+            AbsentEmployeeScheduleStartTime = stab.StartTime,
+            AbsentEmployeeScheduleHalfDayMorningEnd = stab.HalfDayMorningEnd,
+            AbsentEmployeeScheduleHalfDayAfternoonStart = stab.HalfDayAfternoonStart,
+            AbsentEmployeeScheduleEndTime = stab.EndTime,
+            PositionId = p.PositionId,
+            Title = p.Name,
+            PositionNumber = p.ExternalId,
+            PositionCode = p.Code,
+            PositionTypeId = pt.PositionTypeId,
+            PositionTypeName = pt.PositionTypeName,
+            PositionTypeExternalId = pt.ExternalId,
+            PositionTypeCode = pt.Code,
+            pt.PositionTypePrimaryStaffingCode,
+            pt.PositionTypeSecondaryStaffingCode,
+            AbsenceReasonId = ar.AbsenceReasonId,
+            VacancyReasonId = null,
+            ReasonName = ar.AbsenceReasonName,
+            ReasonIdentifier = ar.AbsenceReasonExternalId,
+            ReasonCode = COALESCE(arc.Code, ar.AbsenceReasoncode),
+            ReasonDescription = ar.AbsenceReasonDescription,
+            ReasonCategoryIdentifier = ar.AbsenceReasonCategoryExternalId,
+            ReasonCategoryName = ar.AbsenceReasonCategoryName,
+            ReasonCategoryCode = ar.AbsenceReasonCategoryCode,
+            ReasonCategoryDescription = ar.AbsenceReasonCategoryDescription,
+            SubEmployeeId = subtab.SubId,			-- <== SubTab will be NULL for NoSub VacancyDetails or if Unfilled
+            SubLastName = subtab.LastName,
+            SubMiddleName = subtab.MiddleName,
+            SubFirstName = subtab.FirstName,
+            SubExternalId = subtab.ExternalId,
+            SubSecondaryIdentifier = subtab.SecondaryIdentifier,
+            SubPayCodeId = subPc.PayCodeId,			-- <== SubPc will be NULL for NoSub VacancyDetails or if Unfilled
+            SubPayCodeName = subPc.Name,
+            SubPayCodeCode = subPc.Code,
+            SubPayCodeDescription = subPc.Description,
+            SubPayCodeExternalId = subPc.ExternalId,
+            SubPayCodeHourlyRate = subPc.HourlyRate,
+            SubPayCodeUnitRate = subPc.UnitRate,
+            SubPayCodeHalfDayRate = subPc.HalfDayRate,
+            SubPayCodeFullDayRate = subPc.FullDayRate,
+            SubLoginEmail = subtab.LoginEmail,
+            AccountingCodeId = ac.AccountingCodeId,
+            AccountingCodeName = ac.Name,
+            AccountingCodeDescription = ac.Description,
+            AccountingCodeExternalId = ac.ExternalId,
+            AccountingCodeAllocation = vda.Allocation,
+            PayCodeId = pc.PayCodeId,
+            PayCodeName = pc.Name,
+            PayCodeDescription = pc.Description,
+            PayCodeExternalId = pc.ExternalId,
+            PayCodeCode = pc.Code,
+            PayCodeHourlyRate = pc.HourlyRate,
+            PayCodeUnitRate = pc.UnitRate,
+            PayCodeHalfDayRate = pc.HalfDayRate,
+            PayCodeFullDayRate = pc.FullDayRate,
+            IsAbsence = 1,
+            IsVacancy = 0,
+            RequiresSub = case  when vtab.FillStatusId = @FillStatus_NoFillRequired then 0 
+                                when IsNull(vd.VacancyDetailId, 0) <= 0 then 0
+                                when vd.NeedsReplacement = 0 then 0
+                                else 1
+                end,
+            IsFilled = case when asn.AssignmentId is null then 0 else 1 end,
+            FillStatus = case when vtab.FillStatusId = @FillStatus_NoFillRequired then 'NoSubRequired' 
+                              when IsNull(vd.VacancyDetailId, 0) <= 0 then 'NoSubRequired'
+                              when vd.NeedsReplacement = 0 then 'NoSubRequired'
+                              when asn.AssignmentId is null then 'Unfilled'
+                              else 'Filled' end,
+            AssignmentCreateDateTime = asn.CreatedUtc,
+            AbsenceId = atab.AbsenceId,
+            VacancyId = vtab.VacancyId,
+            AssignmentId = asn.AssignmentId,
+            AbsenceDetailId = ad.AbsenceDetailId,
+            VacancyDetailId = case when vd.VacancyDetailId < 0 then null else vd.VacancyDetailId end,
+            vd.PayDayPortion,
+            vd.PayHours,
+            PayUnits = vd.PayUnits,
+            RawPayDays = COALESCE(vd.PayDayPortion, aru.DailyAmount),
+            RawPayHours = COALESCE(vd.PayHours, aru.HourlyAmount),
+            PayTypeId = vd.PayTypeId,
+            PositionTypePayTypeId = pt.PayTypeId,
+            TotalPayHoursForDay = COALESCE(payTotals.TotalPayHoursForDay, ad.TotalHourlyAmount),
+            TotalPayDayPortionsForDay = COALESCE(payTotals.TotalPayDayPortionsForDay, ad.TotalDailyAmount),
+            NotesToAdmin = atab.NotesToApprover,
+            HasNotesToAdmin = case when Len(IsNull(atab.NotesToApprover, '')) > 0 then 1 else 0 end,
+            AdminOnlyNotes = atab.AdminOnlyNotes,
+            HasAdminOnlyNotes = case when Len(IsNull(atab.AdminOnlyNotes, '')) > 0 then 1 else 0 end,
+            NotesToReplacement = vtab.NotesToReplacement,
+            HasNotesToReplacement = case when Len(IsNull(vtab.NotesToReplacement, '')) > 0 then 1 else 0 end,
+            SubIsShadowOrgUser = subtab.IsShadowOrgUser,
+            SubSourceOrgId = IsNull(subTab.ShadowFromOrgId, @OrgId),
+            SubShadowOrgName = shadowOrg.Name,
+            IsVerified = case when vd.VerifiedAtLocal is null then 0 else 1 end,
+            VerifiedAtLocal = vd.VerifiedAtLocal,
+            VerifiedByOrgUserId = vd.VerifiedByOrgUserId,
+            VerifiedByFirstName = vd.VerifiedByFirstName,
+            VerifiedByLastName = vd.VerifiedByLastName,
+            VerifiedByMiddleName = vd.VerifiedByMiddleName,
+            VerifiedByExternalId = vd.VerifiedByExternalId,
+            VerifyComments = vd.VerifyComments,
+            BalanceTrackingTypeId = COALESCE(arb.AbsenceReasonTrackingTypeId, arbcat.AbsenceReasonTrackingTypeId, pt.AbsenceReasonTrackingTypeId),
+            AbsenceReasonBalanceId = COALESCE(arb.AbsenceReasonBalanceId, arbcat.AbsenceReasonBalanceId),
+            AbsenceReasonUsageHours = aru.HourlyAmount,
+            AbsenceReasonUsageDays = aru.DailyAmount,
+            RawAbsenceReasonUsageHours = aru.HourlyAmount,
+            RawAbsenceReasonUsageDays = aru.DailyAmount,
+            ConsecutiveHeaderId = consecHdr.ConsecutiveAssignmentHeaderId,
+            ConsecutiveDetailId = consecDtl.ConsecutiveAssignmentDateId,
+            ConsecutiveHeaderStartDate = consecHdr.StartDate,
+            ConsecutiveHeaderEndDate = consecHdr.EndDate,
+            ConsecutiveHeaderTotalDays = consecHdr.TotalDays,
+            ConsecutiveDetailDayNumber = consecDtl.DayNumber,
+            PositionTypeAccumulatedDays = cumDtl.PositionTypeAccumulatedDays,
+            TotalAccumulatedDays        = cumDtl.TotalAccumulatedDays,
+            PositionTypeCategoryId = pt.CategoryId,
+            TotalAbsenceReasonUsageHoursForDay = ad.TotalHourlyAmount,
+            TotalAbsenceReasonUsageDailyAmountForDay = ad.TotalDailyAmount,
+            DayOfWeekId = ad.DayOfWeek,
+            AbsenceQualifiesForFmla = atab.QualifiesForFmlaId,
+            ContractId = ct.ContractId,
+            ContractExternalId = ct.ExternalId,
+            ContractName = ct.ContractName,
+            SubPermissionSetName = subtab.PermissionSetName,
+            SubPermissionSetIdentifier = subtab.PermissionSetXid,
+            SchoolYearStartDate = sy.StartDate,
+            SchoolYearEndDate = sy.EndDate,
+            SchoolYearName = sy.Name,
+            IsExtracted = isnull(vd.IsExtracted, ad.IsExtracted),
+            @ExtractedForConnectionId,
+            @ExtractId,
+            WorkDayScheduleName = wds.Name,
+            WorkDayScheduleId = wds.WorkDayScheduleId,
+            WorkDayScheduleExternalId = wds.ExternalId,
+            WorkDaySchedulePeriodId = psp.WorkDaySchedulePeriodId,
+            WorkDaySchedulePeriodName = COALESCE(wdsp.Name, psp.name),
+            FTE = p.Fte,
+            HoursPerFullWorkDay = p.HoursPerFullWorkDay,
+            ReasonNames = absenceReasons.Names,
+            @FromDate,
+            @ToDate,
+            ExtractedDate = COALESCE(ad.ExtractedDate, vd.ExtractedDate),
+            WorkDayScheduleVariationName = IsNull(wdsvt.Name, 'Standard'),
+            AbsentEmployeeActive = et.Active,
+            SubActive = subtab.Active,
+            SubBadgeNumber = subtab.BadgeNumber,
+            SubstitutePolicyName = subtab.SubstitutePolicyName,
+            SubstitutePolicyId = subtab.SubstitutePolicyId,
+            AssignmentExternalId = asn.ExternalId,
+            AssignmentIsLongTerm = asn.IsLongTerm,
+            AssignmentNotes = asn.Notes,
+            SubPhoneNumber = subtab.PhoneNumber,
+            SubEmail = subtab.Email,
+            AbsenceReasonUsageExternalIds = absenceReasonExternalIds.ExternalIds,
+            ad.StartedOutsideOfRange,
+            ad.EndedOutsideOfRange,
+            AbsenceDetailStartTime = ad.StartTimelocal,
+            AbsenceDetailEndTime = ad.EndTimeLocal,
+            VacancyDetailStartTime = vd.StartTimeLocal,
+            VacancyDetailEndTime = vd.EndTimeLocal,
+            ReasonNeedsApproval = case when atab.ApprovalStatusId = @ApprovalStatus_NoApprovalRequired then 0 else 1 end,
+            AbsentEmployeePermissionSetId = et.PermissionSetId,
+            AbsentEmployeePermissionSetName = et.PermissionSetName,
+            AbsentEmployeePermissionSetIdentifier = et.PermissionSetIdentifier,
+            SubPositionCode = subPos.Code,
+            SubPositionNumber = subPos.Number,
+            SubPositionPayCodeId = subPosPc.PayCodeId,
+            SubPositionPayCodeName = subPosPc.Name,
+            SubPositionPayCodeCode = subPosPc.Code,
+            SubPositionPayCodeDescription = subPosPc.Description,
+            SubPositionPayCodeExternalId = subPosPc.ExternalId,
+            SubPositionPayCodeHourlyRate = subPosPc.HourlyRate,
+            SubPositionPayCodeUnitRate = subPosPc.UnitRate,
+            SubPositionPayCodeHalfDayRate = subPosPc.HalfDayRate,
+            SubPositionPayCodeFullDayRate = subPosPc.FullDayRate
+
+
+    from		#AbsenceTable				atab
+    join		#AbsenceDetailTable			ad					on	ad.AbsenceId = atab.AbsenceId
+    join		#VacancyTab					vtab				on	vtab.AbsenceId = atab.AbsenceId and vtab.ShouldBeReturned = 1
+    join		#VacancyDetailTable			vd					on	vd.VacancyId = vtab.VacancyId		-- This is an inner join, but it might be to a fake detail record
+                                                                and vd.AbsenceId = ad.AbsenceId
+                                                                and	vd.StartDate = ad.StartDate
+                                                                and vd.VacancyDetailId > 0				-- This needs to be a true vacancy detail
+                                                                and vd.ShouldBeReturned = 1
+    left join   PositionSchedulePeriod      psp (nolock)        on	vd.PositionSchedulePeriodId = psp.PositionSchedulePeriodId
+    left join   WorkDaySchedulePeriod       wdsp (nolock)       on	psp.WorkDaySchedulePeriodId = wdsp.WorkDaySchedulePeriodId
+    left join   WorkDaySchedule             wds (nolock)        on	psp.WorkDayScheduleId = wds.WorkDayScheduleId
+    join		#EmployeeTable				et					on	et.EmployeeId = atab.EmployeeId
+    join		DayPart						dp (nolock)			on	dp.DayPartId = ad.DayPartId
+    join		#AbsenceReasonUsage			aru (nolock)		on	aru.AbsenceDetailId = ad.AbsenceDetailId
+    join		#AbsenceReasonTable			ar 					on	ar.AbsenceReasonId = aru.AbsenceReasonId
+    join		Position					p (nolock)			on	p.PositionId = vtab.PositionId
+                                                                and p.OrgId = @OrgId
+    join		#PositionTypeTable			pt					on	pt.PositionTypeId = p.PositionTypeId
+    join		#ContractTable				ct					on	ct.ContractId = vtab.ContractId
+    join		SchoolYear					sy (nolock)			on	sy.OrgId = @OrgId
+                                                                and ad.StartDate between sy.StartDate and sy.EndDate
+    left join   CalendarChange              cc (nolock)         on	cc.CalendarChangeId = ad.CalendarChangeId
+    left join   WorkDayScheduleVariantType  wdsvt (nolock)      on	wdsvt.WorkDayScheduleVariantTypeId = cc.WorkDayScheduleVariantTypeId
+    left join	#AssignmentTable			asn					on	vd.NeedsReplacement = 1					-- In case there is a rogue assignment on a NoSub detail. 
+                                                                and	asn.AssignmentId = vd.AssignmentId
+    left join	#SubTable					subtab 				on	subtab.SubId = asn.SubId
+    left join	#LocationTable				l					on	l.LocationId = vd.LocationId
+    left join	PayCode						subPc (nolock)		on	subpc.PayCodeId = subtab.PayCodeId
+                                                                and subpc.OrgId = @OrgId
+    left join	Organization				shadowOrg (nolock)	on	subtab.IsShadowOrgUser = 1
+                                                                and shadowOrg.OrgId  = subtab.ShadowFromOrgId
+                                                                and shadowOrg.DeletedUtc > @UtcNow
+    left join	AbsenceReasonBalance		arb (nolock)		on	arb.EmployeeId = atab.EmployeeId
+                                                                and arb.OrgId = @OrgId
+                                                                and arb.AbsenceReasonId = aru.AbsenceReasonId
+                                                                and arb.SchoolYearId = sy.SchoolYearId
+                                                                and arb.DeletedUtc > @UtcNow
+   left join	AbsenceReasonBalance		arbcat (nolock)		on	arbcat.EmployeeId = atab.EmployeeId
+                                                                and arbcat.OrgId = @OrgId
+                                                                and arbcat.AbsenceReasonCategoryId = ar.AbsenceReasonCategoryId
+                                                                and arbcat.SchoolYearId = sy.SchoolYearId
+                                                                and arbcat.DeletedUtc > @UtcNow
+    left join	AbsenceReasonContract		arc (nolock)		on	arc.AbsenceReasonId = ar.AbsenceReasonId
+                                                                and arc.OrgId = @OrgId
+                                                                and arc.ContractId = vtab.ContractId
+    left join	VacancyDetailAccountingCode vda (nolock)		on	vda.VacancyDetailId = vd.VacancyDetailId
+                                                                and vda.OrgId = @OrgId			-- Not using vda.DeletedUtc because VacancyDetailAccountingCode is a Hard Delete table
+    left join	AccountingCode				ac (nolock)			on	ac.AccountingCodeId = vda.AccountingCodeId
+                                                                and ac.OrgId = @OrgId
+    left join	PayCode						pc (nolock)			on	pc.PayCodeId = vd.PayCodeId
+                                                                and pc.OrgId = @OrgId
+    left join	ConsecutiveAssignmentDate	consecDtl (nolock)	on	consecDtl.EmployeeId = asn.SubId
+                                                                and consecDtl.AssignmentId = asn.AssignmentId
+                                                                and consecDtl.Date = vd.StartDate
+    left join	ConsecutiveAssignmentHeader	consecHdr (nolock)	on	consecHdr.ConsecutiveAssignmentHeaderId = consecDtl.ConsecutiveAssignmentHeaderId
+    left join	CumulativeAssignmentDate	cumDtl (nolock)		on	vd.VacancyDetailId = cumDtl.VacancyDetailId
+    left join	SubstitutePositionInfo 		subPos (nolock)		on	subtab.SubId = subPos.EmployeeId
+                                                                and pt.PositionTypeId = subPos.PositionTypeId
+                                                                and subPos.DeletedUtc > @UtcNow
+    left join 	PayCode						subPosPc (nolock)	on	subPos.PayCodeId = subPosPc.PayCodeId
+
+    -- In order to properly allocate pay hours and day portions when the granularity of a report changes
+    -- we need to also know the total pay hours and day portions for the entire day of the Vacancy
+    OUTER APPLY (
+                SELECT	TotalPayHoursForDay = Sum(vdForPay.PayHours),
+                        TotalPayDayPortionsForDay = Sum(vdForPay.PayDayPortion)
+                FROM	#VacancyDetailTable	vdForPay
+                JOIN	#VacancyTab			vForPay on vForPay.VacancyId = vdForPay.VacancyId
+                WHERE	vForPay.AbsenceId = atab.AbsenceId
+                and		vdForPay.StartDate = vd.StartDate
+                ) payTotals
+
+    -- If a day of a Sub Required Absence falls on a day with a calendar change that causes that day to not require a Sub, then
+    -- we need to fallback to getting the Location information from the Position Schedule for that day instead of the Vacancy Detail
+    left join		#ScheduleTab	stab	on	stab.EmployeeId = atab.EmployeeId
+                                            and stab.EmployeeId = ad.EmployeeId
+                                            and	stab.PositionId = p.PositionId
+                                            and	stab.DayOfWeek = ad.DayOfWeek 
+    -- on the other hand, we don't want to risk _duplicating_ entries where we _do_ know the location,
+    -- which can happen for period by period schedules.
+    -- So, if we _do_ have a location, we join on that location id, too.
+                                            and (l.LocationId is null or l.LocationId = stab.LocationId)
+
+    left join		#LocationTable	lt		on	lt.LocationId = stab.LocationId
+
+    -- This allows us to get a comma delimited list of Absence Reason Names while still returning raw data that includes a row for each Reason
+    OUTER APPLY (
+                SELECT STRING_AGG(Convert(nvarchar(max), reasons.Name), ', ') WITHIN GROUP (ORDER BY reasons.Name) As [Names]
+                FROM
+                    (
+                        SELECT DISTINCT ar1.AbsenceReasonName as [Name]
+                        FROM #AbsenceReasonTable ar1
+                                 join #AbsenceReasonUsage	aru (nolock) on aru.AbsenceReasonId = ar1.AbsenceReasonId
+                        where aru.AbsenceDetailId = ad.AbsenceDetailId
+                    ) reasons
+                ) absenceReasons
+    OUTER APPLY (
+                SELECT STRING_AGG(Convert(nvarchar(max), ars.ExternalId), ', ') WITHIN GROUP (ORDER BY ars.ExternalId) As [ExternalIds]
+                FROM
+                    (
+                        SELECT DISTINCT aru.ExternalId as [ExternalId]
+                        FROM #AbsenceReasonUsage	aru
+                        where aru.AbsenceDetailId = ad.AbsenceDetailId
+                    ) ars
+            ) absenceReasonExternalIds
+
+    where	(@NeedSub is null or @NeedSub = case when IsNull(vd.VacancyDetailId, 0) <= 0 then 0 
+                                                 when vd.NeedsReplacement = 0 then 0 
+                                                 else 1 
+                                            end)
+    and		(@IncludeUnfilled = 1 or subTab.subId is not null)
+    and 	ISNULL(@IsExtracted, 0) = CASE WHEN @IsExtracted IS NULL THEN 0 ELSE ISNULL(vd.IsExtracted, ad.IsExtracted) END
+
+
+    -- =========================================================================================================================
+    -- Query 2: Normal Vacancy Information (those not created from Absences)
+    -- =========================================================================================================================
+    Insert #ReturnTable
+    select  Query = 'Q2',
+            OrgId = @OrgId,
+            OrgIdentifier = @OrgExternalId,
+            ConfirmationNumber = CONCAT('#V',vtab.VacancyId),
+            CreateDateTime = vtab.CreatedUtc,
+            LeadTime = CAST(DATEDIFF(minute, vtab.CreatedUtc, vd.StartTimeUtc) AS DECIMAL) / 60,
+            NumDays = vtab.NumDays,
+            TotalDayPortion = vtab.EffectiveDayPortion,
+            TotalDurationMinutes = vtab.EffectiveDuration,
+            IsApproved = case when vtab.ApprovalStatusId = @ApprovalStatus_Approved then 1 else 0 end,
+            Date = CONVERT(Date, vd.StartTimeLocal),
+            DayPart = IsNull(vdc.Name, 'Custom'),
+            DayPortion = vd.PayDayPortion,
+            AbsStartTime = null,
+            AbsEndTime = null,
+            AbsDurationMinutes = null,
+            AbsDurationHours = null,
+            SubStartTime = vd.StartTimeLocal,
+            SubEndTime = vd.EndTimeLocal,
+            SubDurationMinutes = DATEDIFF(minute, vd.StartTimeLocal,  vd.EndTimeLocal),
+            vd.SubDurationHours,
+            vd.SubMinutesWorked,
+            LocationId = lt.LocationId,
+            LocationName = lt.LocationName,
+            LocationIdentifier = lt.ExternalId,
+            LocationCode = lt.LocationCode,
+            LocationGroupId = lt.LocationGroupId,
+            LocationGroupName = lt.LocationGroupName,
+            LocationGroupIdentifier = lt.LocationGroupXid,
+            AbsentEmployeeId = null,
+            AbsentEmployeeLastName = 'Vacancy: ' + p.Name,
+            AbsentEmployeeMiddleName = null,
+            AbsentEmployeeFirstName = null,
+            AbsentEmployeeExternalId = null,
+            AbsentEmployeeSecondaryIdentifier = null,
+            AbsentEmployeeBadgeNumber = null,
+            AbsentEmployeeLoginEmail = null,
+            AbsentEmployeeScheduleStartTime = null,
+            AbsentEmployeeScheduleHalfDayMorningEnd = null,
+            AbsentEmployeeScheduleHalfDayAfternoonStart = null,
+            AbsentEmployeeScheduleEndTime = null,
+            PositionId = p.PositionId,
+            Title = p.Name,
+            PositionNumber = p.ExternalId,
+            PositionCode = p.Code,
+            PositionTypeId = pt.PositionTypeId,
+            PositionTypeName = pt.PositionTypeName,
+            PositionTypeExternalId = pt.ExternalId,
+            PositionTypeCode = pt.Code,
+            pt.PositionTypePrimaryStaffingCode,
+            pt.PositionTypeSecondaryStaffingCode,
+            AbsenceReasonId = null,
+            VacancyReasonId = vr.VacancyReasonId,
+            ReasonName = vr.Name,
+            ReasonIdentifier = vr.ExternalId,
+            ReasonCode = vr.Code,
+            ReasonDescription = vr.Description,
+            ReasonCategoryIdentifier = null,
+            ReasonCategoryName = null,
+            ReasonCategoryCode = null,
+            ReasonCategoryDescription = null,
+            SubEmployeeId = subtab.SubId,
+            SubLastName = subtab.LastName,
+            SubMiddleName = subtab.MiddleName,
+            SubFirstName = subtab.FirstName,
+            SubExternalId = subtab.ExternalId,
+            SubSecondaryIdentifier = subtab.SecondaryIdentifier,
+            SubPayCodeId = subPc.PayCodeId,
+            SubPayCodeName = subPc.Name,
+            SubPayCodeCode = subPc.Code,
+            SubPayCodeDescription = subPc.Description,
+            SubPayCodeExternalId = subPc.ExternalId,
+            SubPayCodeHourlyRate = subPc.HourlyRate,
+            SubPayCodeUnitRate = subPc.UnitRate,
+            SubPayCodeHalfDayRate = subPc.HalfDayRate,
+            SubPayCodeFullDayRate = subPc.FullDayRate,
+            SubLoginEmail = subtab.LoginEmail,
+            AccountingCodeId = ac.AccountingCodeId,
+            AccountingCodeName = ac.Name,
+            AccountingCodeDescription = ac.Description,
+            AccountingCodeExternalId = ac.ExternalId,
+            AccountingCodeAllocation = vda.Allocation,
+            PayCodeId = pc.PayCodeId,
+            PayCodeName = pc.Name,
+            PayCodeDescription = pc.Description,
+            PayCodeExternalId = pc.ExternalId,
+            PayCodeCode = pc.Code,
+            PayCodeHourlyRate = pc.HourlyRate,
+            PayCodeUnitRate = pc.UnitRate,
+            PayCodeHalfDayRate = pc.HalfDayRate,
+            PayCodeFullDayRate = pc.FullDayRate,
+            IsAbsence = 0,
+            IsVacancy = 1,
+            RequiresSub = 1,
+            IsFilled = case when asn.AssignmentId is null then 0 else 1 end,
+            FillStatus = case when asn.AssignmentId is null then 'Unfilled' else 'Filled' end,
+            AssignmentCreateDateTime = asn.CreatedUtc,
+            AbsenceId = null,
+            VacancyId = vtab.VacancyId,
+            AssignmentId = asn.AssignmentId,
+            AbsenceDetailId = null,
+            VacancyDetailId = vd.VacancyDetailId,
+            PayDays = vd.PayDayPortion,
+            PayHours = vd.PayHours,
+            PayUnits = vd.PayUnits,
+            RawPayDays = vd.PayDayPortion,
+            RawPayHours = vd.PayHours,
+            PayTypeId = vd.PayTypeId,
+            PositionTypePayTypeId = pt.PayTypeId,
+            TotalPayHoursForDay = payTotals.TotalPayHoursForDay,
+            TotalPayDayPortionsForDay = payTotals.TotalPayDayPortionsForDay,
+            NotesToAdmin = null,
+            HasNotesToAdmin = 0,
+            AdminOnlyNotes = vtab.AdminOnlyNotes,
+            HasAdminOnlyNotes = case when Len(IsNull(vtab.AdminOnlyNotes, '')) > 0 then 1 else 0 end,
+            NotesToReplacement = vtab.NotesToReplacement,
+            HasNotesToReplacement = case when Len(IsNull(vtab.NotesToReplacement, '')) > 0 then 1 else 0 end,
+            SubIsShadowOrgUser = subtab.IsShadowOrgUser,
+            SubSourceOrgId = IsNull(subTab.ShadowFromOrgId, @OrgId),
+            SubShadowOrgName = shadowOrg.Name,
+            IsVerified = case when vd.VerifiedAtLocal is null then 0 else 1 end,
+            VerifiedAtLocal = vd.VerifiedAtLocal,
+            VerifiedByOrgUserId = vd.VerifiedByOrgUserId,
+            VerifiedByFirstName = vd.VerifiedByFirstName,
+            VerifiedByLastName = vd.VerifiedByLastName,
+            VerifiedByMiddleName = vd.VerifiedByMiddleName,
+            VerifiedByExternalId = vd.VerifiedByExternalId,
+            VerifyComments = vd.VerifyComments,
+            BalanceTrackingTypeId = null,
+			AbsenceReasonBalanceId = null,
+            AbsenceReasonUsageHours = null,
+            AbsenceReasonUsageDays = null,
+            RawAbsenceReasonUsageHours = null,
+            RawAbsenceReasonUsageDays = null,
+            ConsecutiveHeaderId = consecHdr.ConsecutiveAssignmentHeaderId,
+            ConsecutiveDetailId = consecDtl.ConsecutiveAssignmentDateId,
+            ConsecutiveHeaderStartDate = consecHdr.StartDate,
+            ConsecutiveHeaderEndDate = consecHdr.EndDate,
+            ConsecutiveHeaderTotalDays = consecHdr.TotalDays,
+            ConsecutiveDetailDayNumber = consecDtl.DayNumber,
+            PositionTypeAccumulatedDays = cumDtl.PositionTypeAccumulatedDays,
+            TotalAccumulatedDays        = cumDtl.TotalAccumulatedDays,
+            PositionTypeCategoryId = pt.CategoryId,
+            TotalAbsenceReasonUsageHoursForDay = null,
+            TotalAbsenceReasonUsageDailyAmountForDay = null,
+            DayOfWeekId = (DATEPART(dw, vd.StartTimeLocal) - 1),
+            AbsenceQualifiesForFmla = -1,
+            ContractId = ct.ContractId,
+            ContractExternalId = ct.ExternalId,
+            ContractName = ct.ContractName,
+            SubPermissionSetName = subtab.PermissionSetName,
+            SubPermissionSetIdentifier = subtab.PermissionSetXid,
+            SchoolYearStartDate = sy.StartDate,
+            SchoolYearEndDate = sy.EndDate,
+            SchoolYearName = sy.Name,
+            IsExtracted = isnull(vd.IsExtracted, 0),
+            @ExtractedForConnectionId,
+            @ExtractId,
+            WorkDayScheduleName = wds.Name,
+            WorkDayScheduleId = wds.WorkDayScheduleId,
+            WorkDayScheduleExternalId = wds.ExternalId,
+            WorkDaySchedulePeriodId = wdsp.WorkDaySchedulePeriodId,
+            WorkDaySchedulePeriodName = wdsp.Name,
+            FTE = p.Fte,
+            HoursPerFullWorkDay = p.HoursPerFullWorkDay,
+            ReasonNames = vr.Name, -- We only do a single reason per day
+            @FromDate,
+            @ToDate,
+            ExtractedDate = vd.ExtractedDate,
+            WorkDayScheduleVariationName = IsNull(wdsvt.Name, 'Standard'),
+            AbsentEmployeeActive = null,
+            SubActive = subtab.Active,
+            SubBadgeNumber = subtab.BadgeNumber,
+            SubstitutePolicyName = subtab.SubstitutePolicyName,
+            SubstitutePolicyId = subtab.SubstitutePolicyId,
+            AssignmentExternalId = asn.ExternalId,
+            AssignmentIsLongTerm = asn.IsLongTerm,
+            AssignmentNotes = asn.Notes,
+            SubPhoneNumber = subtab.PhoneNumber,
+            SubEmail = subtab.Email,
+            AbsenceReasonUsageExternalIds = null,
+            vd.StartedOutsideOfRange,
+            vd.EndedOutsideOfRange,
+            AbsenceDetailStartTime = null,
+            AbsenceDetailEndTime = null,
+            VacancyDetailStartTime = vd.StartTimeLocal,
+            VacancyDetailEndTime = vd.EndTimeLocal,
+            ReasonNeedsApproval = case when vtab.ApprovalStatusId = @ApprovalStatus_NoApprovalRequired then 0 else 1 end,
+            AbsentEmployeePermissionSetId = null,
+            AbsentEmployeePermissionSetName = null,
+            AbsentEmployeePermissionSetIdentifier = null,
+            SubPositionCode = subPos.Code,
+            SubPositionNumber = subPos.Number,
+            SubPositionPayCodeId = subPosPc.PayCodeId,
+            SubPositionPayCodeName = subPosPc.Name,
+            SubPositionPayCodeCode = subPosPc.Code,
+            SubPositionPayCodeDescription = subPosPc.Description,
+            SubPositionPayCodeExternalId = subPosPc.ExternalId,
+            SubPositionPayCodeHourlyRate = subPosPc.HourlyRate,
+            SubPositionPayCodeUnitRate = subPosPc.UnitRate,
+            SubPositionPayCodeHalfDayRate = subPosPc.HalfDayRate,
+            SubPositionPayCodeFullDayRate = subPosPc.FullDayRate
+
+    from		#VacancyTab					vtab
+    join		#VacancyDetailTable			vd 					on	vd.VacancyId = vtab.VacancyId and vd.ShouldBeReturned = 1
+
+    left join   WorkDaySchedulePeriod       wdsp (nolock)       on  wdsp.WorkDaySchedulePeriodId = vd.WorkDaySchedulePeriodId
+    left join   WorkDaySchedule             wds (nolock)        on  wds.WorkDayScheduleId = vd.WorkDayScheduleId
+    join		Position					p (nolock)			on	p.PositionId = vtab.PositionId
+                                                                and p.OrgId = @OrgId
+    join		#PositionTypeTable			pt					on	pt.PositionTypeId = p.PositionTypeId
+    join		#ContractTable				ct					on	ct.ContractId = vtab.ContractId
+    join		#LocationTable				lt 					on	lt.LocationId = vd.LocationId
+    join		SchoolYear					sy (nolock)			on	sy.OrgId = @OrgId
+                                                                and vd.StartDate between sy.StartDate and sy.EndDate
+    left join   CalendarChange              cc (nolock)         on cc.CalendarChangeId = vd.CalendarChangeId
+    left join   WorkDayScheduleVariantType  wdsvt (nolock)      on wdsvt.WorkDayScheduleVariantTypeId = cc.WorkDayScheduleVariantTypeId
+    left join	#AssignmentTable			asn 				on	asn.AssignmentId = vd.AssignmentId
+    left join	#SubTable					subtab 				on	subtab.SubId = asn.SubId
+    left join	PayCode						subPc (nolock)		on	subPc.PayCodeId = subtab.PayCodeId
+                                                                and subPc.OrgId = @OrgId
+    left join	Organization				shadowOrg (nolock)	on	subtab.IsShadowOrgUser = 1
+                                                                and	shadowOrg.OrgId = subtab.ShadowFromOrgId
+                                                                and shadowOrg.DeletedUtc > @UtcNow
+    left join	VacancyReason				vr (nolock)			on	vr.VacancyReasonId = vd.VacancyReasonId
+                                                                and vr.OrgId = @OrgId
+    left join	VacancyDetailAccountingCode vda (nolock)		on	vda.VacancyDetailId = vd.VacancyDetailId
+                                                                and vda.OrgId = @OrgId        -- Not using vda.DeletedUtc because VacancyDetailAccountingCode is a Hard Delete table
+    left join	AccountingCode				ac (nolock)			on	ac.AccountingCodeId = vda.AccountingCodeId
+                                                                and ac.OrgId = @OrgId
+    left join	PayCode						pc (nolock)			on	pc.PayCodeId = vd.PayCodeId
+                                                                and pc.OrgId = @OrgId
+    left join	ConsecutiveAssignmentDate	consecDtl (nolock)	on	consecDtl.EmployeeId = asn.SubId
+                                                                and consecDtl.AssignmentId = asn.AssignmentId
+                                                                and consecDtl.Date = vd.StartDate
+    left join	ConsecutiveAssignmentHeader	consecHdr (nolock)	on	consecHdr.ConsecutiveAssignmentHeaderId = consecDtl.ConsecutiveAssignmentHeaderId
+    left join	CumulativeAssignmentDate	cumDtl (nolock)		on vd.VacancyDetailId = cumDtl.VacancyDetailId
+    left join	SubstitutePositionInfo 		subPos (nolock)		on subtab.SubId = subPos.EmployeeId
+                                                                and pt.PositionTypeId = subPos.PositionTypeId
+                                                                and subPos.DeletedUtc > @UtcNow
+    left join 	PayCode						subPosPc (nolock)	on subPos.PayCodeId = subPosPc.PayCodeId
+
+    -- In order to properly allocate pay hours and day portions when the granularity of a report changes
+    -- we need to also know the total pay hours and day portions for the entire day of the Vacancy
+    OUTER APPLY (
+                SELECT	TotalPayHoursForDay = Sum(vdForPay.PayHours),
+                        TotalPayDayPortionsForDay = Sum(vdForPay.PayDayPortion)
+                FROM	#VacancyDetailTable	vdForPay
+                WHERE	vdForPay.VacancyId = vd.VacancyId
+                and		vdForPay.StartDate = vd.StartDate
+                ) payTotals
+
+    -- Vacancies don't have a hard and fast set of Day Portions like Absences do. Because of that
+    -- we have to get the Vacancy Day Conversions defined by the Organization in order to return a DayPart name
+    left join (
+                SELECT	oc.OrgId,
+                        c.Name,
+                        c.DayEquivalent
+                FROM	OrganizationConfigs oc (nolock)
+                            CROSS APPLY OPENJSON(oc.VacancyDayConversionsJson, '$') WITH([Name] varchar(100), DayEquivalent decimal(10, 2)) c
+            ) vdc	on	vdc.OrgId = @OrgId
+                    and vd.PayDayPortion = vdc.DayEquivalent
+
+    where	vtab.IsNormalVacancy = 1
+        and     vtab.ShouldBeReturned = 1
+        and		vtab.AbsenceId is null
+        and		vtab.FillStatusId <> @FillStatus_NoFillRequired
+        and		(@IncludeUnfilled = 1 or subTab.subId is not null)
+        and 	ISNULL(@IsExtracted, 0) = CASE WHEN @IsExtracted IS NULL THEN 0 ELSE ISNULL(vd.IsExtracted, 0) END
+
+    -- =========================================================================================================================
+    -- Query 3: Absences that do not Require a Sub
+    -- =========================================================================================================================
+    if(@IncludeSubNotNeeded = 1) begin
+        Insert #ReturnTable
+        select  Query = 'Q3',
+                OrgId = @OrgId,
+                OrgIdentifier = @OrgExternalId,
+                ConfirmationNumber = CONCAT('#',atab.AbsenceId),
+                CreateDateTime = atab.CreatedUtc,
+                LeadTime = CAST(DATEDIFF(minute, atab.CreatedUtc, ad.StartTimeUtc) AS DECIMAL) / 60,
+                NumDays = atab.NumDays,
+                TotalDayPortion = atab.TotalDayPortion,
+                TotalDurationMinutes = atab.TotalDuration,
+                IsApproved = case when atab.ApprovalStatusId = @ApprovalStatus_Approved then 1 else 0 end,
+                Date = ad.StartDate,
+                DayPart = IsNull(dp.Description, 'Custom'),
+                DayPortion = ad.DayPortion,
+                AbsStartTime = ad.StartTimeLocal,
+                AbsEndTime = ad.EndTimeLocal,
+                AbsDurationMinutes = DATEDIFF(minute, ad.StartTimeLocal,  ad.EndTimeLocal),
+                AbsDurationHours = ROUND(DATEDIFF(minute, ad.StartTimeLocal,  ad.EndTimeLocal)/60.0, 2),
+                SubStartTime = null,
+                SubEndTime = null,
+                SubDurationMinutes = null,
+                SubDurationHours = null,
+                SubMinutesWorked = null,
+                LocationId = lt.LocationId,
+                LocationName = lt.LocationName,
+                LocationIdentifier = lt.ExternalId,
+                LocationCode = lt.LocationCode,
+                LocationGroupId = lt.LocationGroupId,
+                LocationGroupName = lt.LocationGroupName,
+                LocationGroupIdentifier = lt.LocationGroupXid,
+                AbsentEmployeeId = et.EmployeeId,
+                AbsentEmployeeLastName = et.LastName,
+                AbsentEmployeeMiddleName = et.MiddleName,
+                AbsentEmployeeFirstName = et.FirstName,
+                AbsentEmployeeExternalId = et.ExternalId,
+                AbsentEmployeeSecondaryIdentifier = et.SecondaryIdentifier,
+                AbsentEmployeeBadgeNumber = et.BadgeNumber,
+                AbsentEmployeeLoginEmail = et.LoginEmail,
+                AbsentEmployeeScheduleStartTime = stab.StartTime,
+                AbsentEmployeeScheduleHalfDayMorningEnd = stab.HalfDayMorningEnd,
+                AbsentEmployeeScheduleHalfDayAfternoonStart = stab.HalfDayAfternoonStart,
+                AbsentEmployeeScheduleEndTime = stab.EndTime,
+                PositionId = pos.PositionId,
+                Title = pos.Name,
+                PositionNumber = pos.ExternalId,
+                PositionCode = pos.Code,
+                pos.PositionTypeId,
+                pt.PositionTypeName,
+                PositionTypeExternalId = pt.ExternalId,
+                PositionTypeCode = pt.Code,
+                pt.PositionTypePrimaryStaffingCode,
+                pt.PositionTypeSecondaryStaffingCode,
+                AbsenceReasonId = ar.AbsenceReasonId,
+                VacancyReasonId = null,
+                ReasonName = ar.AbsenceReasonName,
+                ReasonIdentifier = ar.AbsenceReasonExternalId,
+                ReasonCode = COALESCE(arc.Code, ar.AbsenceReasoncode),
+                ReasonDescription = ar.AbsenceReasonDescription,
+                ReasonCategoryIdentifier = ar.AbsenceReasonCategoryExternalId,
+                ReasonCategoryName = ar.AbsenceReasonCategoryName,
+                ReasonCategoryCode = ar.AbsenceReasonCategoryCode,
+                ReasonCategoryDescription = ar.AbsenceReasonCategoryDescription,
+                SubEmployeeId = null,
+                SubLastName = null,
+                SubMiddleName = null,
+                SubFirstName = null,
+                SubExternalId = null,
+                SubSecondaryIdentifier = null,
+                SubPayCodeId = null,
+                SubPayCodeName = null,
+                SubPayCodeCode = null,
+                SubPayCodeDescription = null,
+                SubPayCodeExternalId = null,
+                SubPayCodeHourlyRate = null,
+                SubPayCodeUnitRate = null,
+                SubPayCodeHalfDayRate = null,
+                SubPayCodeFullDayRate = null,
+                SubLoginEmail = null,
+                AccountingCodeId = ac.AccountingCodeId,
+                AccountingCodeName = ac.Name,
+                AccountingCodeDescription = ac.Description,
+                AccountingCodeExternalId = ac.ExternalId,
+                AccountingCodeAllocation = pac.Allocation,
+                PayCodeId = null,
+                PayCodeName = null,
+                PayCodeDescription = null,
+                PayCodeExternalId = null,
+                PayCodeCode = null,
+                PayCodeHourlyRate = null,
+                PayCodeUnitRate = null,
+                PayCodeHalfDayRate = null,
+                PayCodeFullDayRate = null,
+                IsAbsence = 1,
+                IsVacancy = 0,
+                RequiresSub = 0,
+                IsFilled = 0,
+                FillStatus = 'NoSubRequired',
+                AssignmentCreateDateTime = null,
+                AbsenceId = atab.AbsenceId,
+                VacancyId = null,
+                AssignmentId = null,
+                AbsenceDetailId = ad.AbsenceDetailId,
+                VacancyDetailId = null,
+                PayDays = null,
+                PayHours = null,
+                PayUnits = null,
+                -- For RawPayDays and RawPayHours, we're not matching up the Absence Detail times to the exact
+                -- Position Schedule Periods to attribute something like 1 hour to Location A and 3 hours to Location B.
+                -- Instead we're just dividing DayPortion or ActualDuration evenly across all of the Locations the Employee
+                -- would potentially work at in a single day based on their Position Schedule configuration.
+                --
+                -- CWS: For whatever reason, we can, in fact, end up with TotalNumberOfLocations = 0,
+                --      so, while there might be bad data to fix, I'm adding a NULLIF check so reports
+                --      don't just fail
+                -- 		and ISNULL to change them to assume 1 location (MPS 10/6/2023)
+                RawPayDays = ad.DayPortion / ISNULL(NULLIF(scheduleLocations.TotalNumberOfLocations,0), 1),
+                RawPayHours = (ad.Duration - ad.BreakDuration) / ISNULL(NULLIF(scheduleLocations.TotalNumberOfLocations,0), 1) / 60.0,
+                PayTypeId = null,
+                PositionTypePayTypeId = null,
+                TotalPayHoursForDay = (ad.Duration - ad.BreakDuration) / 60.0,
+                TotalPayDayPortionsForDay = ad.DayPortion,
+                NotesToAdmin = atab.NotesToApprover,
+                HasNotesToAdmin = case when Len(IsNull(atab.NotesToApprover, '')) > 0 then 1 else 0 end,
+                AdminOnlyNotes = atab.AdminOnlyNotes,
+                HasAdminOnlyNotes = case when Len(IsNull(atab.AdminOnlyNotes, '')) > 0 then 1 else 0 end,
+                NotesToReplacement = null,
+                HasNotesToReplacement = 0,
+                SubIsShadowOrgUser = null,
+                SubSourceOrgId = null,
+                SubShadowOrgName = null,
+                IsVerified = 0,
+                VerifiedAtLocal = null,
+                VerifiedByOrgUserId = null,
+                VerifiedByFirstName = null,
+                VerifiedByLastName = null,
+                VerifiedByMiddleName = null,
+                VerifiedByExternalId = null,
+                VerifyComments = null,
+                BalanceTrackingTypeId = COALESCE(arb.AbsenceReasonTrackingTypeId, arbcat.AbsenceReasonTrackingTypeId, pt.AbsenceReasonTrackingTypeId),
+                AbsenceReasonBalanceId = COALESCE(arb.AbsenceReasonBalanceId, arbcat.AbsenceReasonBalanceId),
+                AbsenceReasonUsageHours = aru.HourlyAmount,
+                AbsenceReasonUsageDays = aru.DailyAmount,
+                RawAbsenceReasonUsageHours = aru.HourlyAmount,
+                RawAbsenceReasonUsageDays = aru.DailyAmount,
+                ConsecutiveHeaderId = null,
+                ConsecutiveDetailId = null,
+                ConsecutiveHeaderStartDate = null,
+                ConsecutiveHeaderEndDate = null,
+                ConsecutiveHeaderTotalDays = null,
+                ConsecutiveDetailDayNumber = null,
+                PositionTypeAccumulatedDays = null,
+                TotalAccumulatedDays        = null,
+                PositionTypeCategoryId = pt.CategoryId,
+                TotalAbsenceReasonUsageHoursForDay = aruForTotals.TotalAbsenceReasonUsageHoursForDay,
+                TotalAbsenceReasonUsageDailyAmountForDay = aruForTotals.TotalAbsenceReasonUsageDailyAmountForDay,
+                DayOfWeekId = ad.DayOfWeek,
+                AbsenceQualifiesForFmla = atab.QualifiesForFmlaId,
+                ContractId = pos.CurrentContractId, -- If there is no Vacancy (hence we are in Query 3), the best we can do is use the current contract from the Position.  This might be wrong. 
+                ContractExternalId = ct.ExternalId,
+                ct.ContractName,
+                SubPermissionSetName = null,
+                SubPermissionSetIdentifier = null,
+                SchoolYearStartDate = sy.StartDate,
+                SchoolYearEndDate = sy.EndDate,
+                SchoolYearName = sy.Name,
+                IsExtracted = isnull(ad.IsExtracted, 0),
+                @ExtractedForConnectionId,
+                @ExtractId,
+                WorkDayScheduleName = null,
+                WorkDayScheduleId = null,
+                WorkDayScheduleExternalId = null,
+                WorkDaySchedulePeriodId = null,
+                WorkDaySchedulePeriodName = null,
+                FTE = pos.Fte,
+                HoursPerFullWorkDay = pos.HoursPerFullWorkDay,
+                ReasonNames = absenceReasons.Names,
+                @FromDate,
+                @ToDate,
+                ExtractedDate = ad.ExtractedDate,
+                WorkDayScheduleVariationName = IsNull(wdsvt.Name, 'Standard'),
+                AbsentEmployeeActive = et.Active,
+                SubActive = null,
+                SubBadgeNumber = null,
+                SubstitutePolicyName = null,
+                SubstitutePolicyId = null,
+                AssignmentExternalId = null,
+                AssignmentIsLongTerm = null,
+                AssignmentNotes = null,
+                SubPhoneNumber = null,
+                SubEmail = null,
+                AbsenceReasonUsageExternalIds = absenceReasonExternalIds.ExternalIds,
+                ad.StartedOutsideOfRange,
+                ad.EndedOutsideOfRange,
+                AbsenceDetailStartTime = ad.StartTimeLocal,
+                AbsenceDetailEndTime = ad.EndTimeLocal,
+                VacancyDetailStartTime = null,
+                VacancyDetailEndTime = null,
+                ReasonNeedsApproval = case when atab.ApprovalStatusId = @ApprovalStatus_NoApprovalRequired then 0 else 1 end,
+                AbsentEmployeePermissionSetId = et.PermissionSetId,
+                AbsentEmployeePermissionSetName = et.PermissionSetName,
+                AbsentEmployeePermissionSetIdentifier = et.PermissionSetIdentifier,
+                SubPositionCode = null,
+                SubPositionNumber = null,
+                SubPositionPayCodeId = null,
+                SubPositionPayCodeName = null,
+                SubPositionPayCodeCode = null,
+                SubPositionPayCodeDescription = null,
+                SubPositionPayCodeExternalId = null,
+                SubPositionPayCodeHourlyRate = null,
+                SubPositionPayCodeUnitRate = null,
+                SubPositionPayCodeHalfDayRate = null,
+                SubPositionPayCodeFullDayRate = null
+
+        from		#AbsenceTable					atab
+        join		#AbsenceDetailTable				ad				on	ad.AbsenceId = atab.AbsenceId
+        left join	#ScheduleTab					stab			on	stab.EmployeeId = atab.EmployeeId
+                                                                    and	stab.DayOfWeek = ad.DayOfWeek
+                                                                    and stab.EmployeeId = ad.EmployeeId
+                                                                    and stab.EffectiveFromDate <= ad.EndDate
+                                                                    and stab.EffectiveToDate >= ad.StartDate
+        left join	Position						pos				on	pos.PositionId = stab.PositionId
+        left join	#PositionTypeTable				pt				on	pt.PositionTypeId = pos.PositionTypeId
+        left join	#ContractTable					ct				on	ct.ContractId = pos.CurrentContractId
+        left join	#LocationTable					lt				on	lt.LocationId = stab.LocationId
+
+        -- This join needs to be to Vacancy, not #VacancyTab because we're interested in
+        -- which absences don't have vacancies regardless of whether the vacancy was filtered out by parameters
+        -- TODO?: Might be able to use #VacancyTab and #VacancyDetailTable now, since we're using a flag?
+        left join	Vacancy							v				on	v.OrgId = @OrgId
+                                                                    and v.AbsenceId = atab.AbsenceId
+                                                                    and	v.DeletedUtc > @UtcNow
+        left join	VacancyDetail					vd				on	vd.OrgId = @OrgId
+                                                                    and vd.VacancyId = v.VacancyId
+                                                                    and vd.DeletedUtc > @UtcNow
+                                                                    and Convert(date, vd.StartTimeLocal) = ad.StartDate
+                                                                    and vd.ClosedByCalendarChange = 0
+        join		#EmployeeTable				et					on	et.EmployeeId = atab.EmployeeId
+        join		DayPart						dp (nolock)			on	dp.DayPartId = ad.DayPartId
+        join		#AbsenceReasonUsage			aru (nolock)		on	aru.AbsenceDetailId = ad.AbsenceDetailId
+        join		#AbsenceReasonTable			ar 					on	ar.AbsenceReasonId = aru.AbsenceReasonId
+        join		SchoolYear					sy (nolock)			on	sy.OrgId = @OrgId
+                                                                    and ad.StartDate between sy.StartDate and sy.EndDate
+        left join   CalendarChange              cc (nolock)         on cc.CalendarChangeId = ad.CalendarChangeId
+        left join   WorkDayScheduleVariantType  wdsvt (nolock)      on wdsvt.WorkDayScheduleVariantTypeId = cc.WorkDayScheduleVariantTypeId
+        left join	AbsenceReasonBalance		arb (nolock)		on	arb.EmployeeId = atab.EmployeeId
+                                                                    and arb.OrgId = @OrgId
+                                                                    and arb.AbsenceReasonId = aru.AbsenceReasonId
+                                                                    and arb.SchoolYearId = sy.SchoolYearId
+                                                                    and arb.DeletedUtc > @UtcNow
+        left join	AbsenceReasonBalance		arbcat (nolock)		on	arbcat.EmployeeId = atab.EmployeeId
+                                                                    and arbcat.OrgId = @OrgId
+                                                                    and arbcat.AbsenceReasonCategoryId = ar.AbsenceReasonCategoryId
+                                                                    and arbcat.SchoolYearId = sy.SchoolYearId
+                                                                    and arbcat.DeletedUtc > @UtcNow
+        left join	AbsenceReasonContract		arc (nolock)		on	arc.AbsenceReasonId = ar.AbsenceReasonId
+                                                                    and arc.OrgId = @OrgId
+                                                                    and arc.ContractId = pos.CurrentContractId
+        left join	PositionAccountingCode		pac					on pos.positionId = pac.positionid and pac.deletedutc > @UtcNow
+        left join	AccountingCode				ac					on pac.AccountingCodeId = ac.AccountingCodeId
+
+        -- In order to properly allocate absence reason usage amounts when the granularity of a report changes
+        -- we need to also know the total absence reason usage amounts for the entire day of the Absence
+        OUTER APPLY (
+                    SELECT	TotalAbsenceReasonUsageHoursForDay = Sum(aruForTotal.HourlyAmount),
+                            TotalAbsenceReasonUsageDailyAmountForDay = Sum(aruForTotal.DailyAmount)
+                    FROM	AbsenceReasonUsage aruForTotal (nolock)
+                    WHERE	aruForTotal.AbsenceDetailId = ad.AbsenceDetailId
+                        and		aruForTotal.OrgId = @OrgId
+                        and		aruForTotal.DeletedUtc > @UtcNow
+                ) aruForTotals
+
+        -- This allows us to get a comma delimited list of Absence Reason Names while still returning raw data that includes a row for each Reason
+        OUTER APPLY (
+                    SELECT STRING_AGG(Convert(nvarchar(max), reasons.Name), ', ') WITHIN GROUP (ORDER BY reasons.Name) As [Names]
+                    FROM
+                        (
+                            SELECT DISTINCT ar1.AbsenceReasonName as [Name]
+                            FROM #AbsenceReasonTable ar1
+                            join #AbsenceReasonUsage	aru (nolock) on aru.AbsenceReasonId = ar1.AbsenceReasonId
+                            where aru.AbsenceDetailId = ad.AbsenceDetailId
+                        ) reasons
+                ) absenceReasons
+        OUTER APPLY (
+                    SELECT STRING_AGG(Convert(nvarchar(max), ars.ExternalId), ', ') WITHIN GROUP (ORDER BY ars.ExternalId) As [ExternalIds]
+                    FROM
+                        (
+                            SELECT DISTINCT aru.ExternalId as [ExternalId]
+                            FROM #AbsenceReasonUsage	aru
+                            where aru.AbsenceDetailId = ad.AbsenceDetailId
+                        ) ars
+                ) absenceReasonExternalIds
+
+        -- If an Employee works at multiple Locations in a single day, we need to know that total number of Locations
+        -- so that we can evenly divide the Day Portion and Duration across those records. This enables us to end up with the
+        -- correct totals when you sum up those values for the Absence Detail.
+        OUTER APPLY (
+                    -- NOTE - we are casting the count to a decimal because above we will be performing MATH division
+                    --        and this allows the division to proceed without losing precision.
+                    SELECT CAST(COUNT(*) as decimal) As TotalNumberOfLocations
+                    FROM (
+                             Select distinct lps.LocationId, lps.PositionId
+                             FROM	#ScheduleTab		lps
+                             WHERE	lps.DayOfWeek = stab.DayOfWeek
+                                   and		lps.EmployeeId = stab.EmployeeId
+                                   and lps.EffectiveFromDate <= atab.EndTimeLocal
+                                   and lps.EffectiveToDate >= atab.StartTimeLocal
+                         ) ct
+                ) scheduleLocations
+        where	vd.VacancyDetailId is null	-- No vacancy detail on the date of the absence.
+            and 	ISNULL(@IsExtracted, 0) = CASE WHEN @IsExtracted IS NULL THEN 0 ELSE ISNULL(ad.IsExtracted, 0) END
+
+            -- These conditions are now needed because we now use Left Joins above to #ScheduleTab
+            and		(@CallerProvided_Contracts = 0 or ct.ContractId is not null)
+            and		(@CallerProvided_Locations = 0 or lt.LocationId is not null)
+            and		(@CallerProvided_PositionTypes = 0 or pt.PositionTypeId is not null)
+    end
+
+    select * from #ReturnTable
+
+
+    IF @debug = 1
+        BEGIN
+            DROP TABLE #AbsenceDetailTable
+            DROP TABLE #AbsenceReasonTable
+            DROP TABLE #AbsenceReasonUsage
+            DROP TABLE #AbsenceTable
+            DROP TABLE #AssignmentTable
+            DROP TABLE #EmployeeTable
+            DROP TABLE #ContractTable
+            DROP TABLE #LocationTable
+            DROP TABLE #PositionTypeTable
+            DROP TABLE #ReturnTable
+            DROP TABLE #ScheduleTab
+            DROP TABLE #StageAbsenceDetailTable
+            DROP TABLE #StageVacancyDetailTable
+            DROP TABLE #SubTable
+            DROP TABLE #VacancyDetailTable
+            DROP TABLE #VacancyTab
+        END
+
+END
+GO

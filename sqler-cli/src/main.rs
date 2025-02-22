@@ -1,5 +1,5 @@
 use clap::Parser;
-use sqler::{format_sql, Config};
+use sqler::{format_sql, Config, LineBreakStyle, SqlDialect};
 use std::fs;
 use std::io::{self, Read};
 
@@ -53,9 +53,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // read input
     let config = Config {
+        uppercase_keywords: true,
         indent_char: ' '.to_string(),
         indent_width: cli.indent,
         max_line_length: cli.max_length,
+        align_columns: true,
+        line_breaks: LineBreakStyle::Always,
+        dialect: SqlDialect::Generic,
     };
 
     let input = read_input(cli.input)?;
