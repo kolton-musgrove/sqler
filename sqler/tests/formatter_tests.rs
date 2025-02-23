@@ -64,4 +64,15 @@ GROUP BY id";
         let result = format_sql(sql, &default_config()).unwrap();
         assert_eq!(expected, result);
     }
+
+    #[test]
+    fn test_select_with_wildcard() {
+        let sql = "SELECT * FROM users";
+        let expected = "\
+SELECT *
+FROM users";
+
+        let result = format_sql(sql, &default_config()).unwrap();
+        assert_eq!(expected, result);
+    }
 }

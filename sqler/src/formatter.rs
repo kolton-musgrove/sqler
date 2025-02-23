@@ -49,7 +49,7 @@ impl<'a> SqlFormatter<'a> {
         parts.push(select_line);
 
         // add the rest of the columns accounting for the indent level if
-        // left align select is enabled.
+        // left align select is enbled.
 
         let base_indent = self.indent();
         let column_padding = if self.config.align_columns {
@@ -99,18 +99,45 @@ impl<'a> SqlFormatter<'a> {
             return String::new();
         }
 
+        let mut alias_padding = 0;
+
+        // if select columns are aligned, aliases are padded to be left aligned
+        // after the longest column name.
+        if self.config.align_columns {
+            alias_padding = items
+                .iter()
+                .map(|item| match item {
+                    SelectItem::Wildcard { .. } => 1,
+                    SelectItem::QualifiedWildcard { qualifier, .. } => qualifier.len() + 2,
+                    SelectItem::Expression { expr, .. } => self.format_expression(expr).len(),
+                })
+                .max()
+                .expect("Failed to get max alias length")
+        }
+
         let formatted: Vec<String> = items
             .iter()
             .enumerate()
             .map(|(index, item)| {
                 let item_str = match item {
-                    SelectItem::Wildcard { .. } => "*.".to_string(),
+                    SelectItem::Wildcard { .. } => "*".to_string(),
                     SelectItem::QualifiedWildcard { qualifier, .. } => {
                         format!("{}.*", qualifier)
                     }
                     SelectItem::Expression { expr, alias, .. } => {
+                        let expression = self.format_expression(expr);
+
                         if let Some(alias_name) = alias {
-                            format!("{} AS {}", self.format_expression(expr), alias_name)
+                            if self.config.align_columns {
+                                format!(
+                                    "{}{} AS {}",
+                                    expression,
+                                    " ".repeat(alias_padding - expression.len()),
+                                    alias_name
+                                )
+                            } else {
+                                format!("{} AS {}", expression, alias_name)
+                            }
                         } else {
                             self.format_expression(expr)
                         }
